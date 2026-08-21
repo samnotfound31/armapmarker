@@ -109,25 +109,18 @@ export function buildCameraFromGroundAtLock(
   if (!Number.isFinite(cameraHeightMeters) || cameraHeightMeters <= 0) {
     throw new RangeError("Camera height must be positive.");
   }
-  const deviceToEarth = w3cDeviceToEarthRotation(orientation);
-  const deviceRightEarth: Vec3 = [
-    deviceToEarth[0],
-    deviceToEarth[1],
-    deviceToEarth[2]
-  ];
-  const deviceTopEarth: Vec3 = [
-    deviceToEarth[3],
-    deviceToEarth[4],
-    deviceToEarth[5]
-  ];
-  const deviceFrontEarth: Vec3 = [
-    deviceToEarth[6],
-    deviceToEarth[7],
-    deviceToEarth[8]
-  ];
-  const cameraRightEarth = deviceRightEarth;
-  const cameraDownEarth = negate(deviceTopEarth);
-  const cameraForwardEarth = negate(deviceFrontEarth);
+  const earthFromGround = buildEarthFromGroundAtLock(orientation);
+  return buildCameraFromGroundWithEarthFrame(
+    orientation,
+    earthFromGround,
+    [0, cameraHeightMeters, 0]
+  );
+}
+
+export function buildEarthFromGroundAtLock(
+  orientation: W3cDeviceOrientation
+): Mat3 {
+  const { cameraForwardEarth } = cameraAxesInEarth(orientation);
   const horizontalForwardLength = Math.hypot(
     cameraForwardEarth[0],
     cameraForwardEarth[1]
@@ -146,12 +139,52 @@ export function buildCameraFromGroundAtLock(
     -groundForwardEarth[0],
     0
   ];
+  return [
+    ...groundRightEarth,
+    ...groundUpEarth,
+    ...groundForwardEarth
+  ];
+}
+
+export function buildCameraFromGroundWithEarthFrame(
+  orientation: W3cDeviceOrientation,
+  earthFromGround: Mat3,
+  cameraPositionGround: Vec3
+): Mat4 {
+  if (
+    earthFromGround.some((value) => !Number.isFinite(value)) ||
+    cameraPositionGround.some((value) => !Number.isFinite(value))
+  ) {
+    throw new RangeError("Orientation frame and camera position must be finite.");
+  }
+  const { cameraRightEarth, cameraDownEarth, cameraForwardEarth } =
+    cameraAxesInEarth(orientation);
+  const groundRightEarth: Vec3 = [
+    earthFromGround[0],
+    earthFromGround[1],
+    earthFromGround[2]
+  ];
+  const groundUpEarth: Vec3 = [
+    earthFromGround[3],
+    earthFromGround[4],
+    earthFromGround[5]
+  ];
+  const groundForwardEarth: Vec3 = [
+    earthFromGround[6],
+    earthFromGround[7],
+    earthFromGround[8]
+  ];
+  const deviceRightEarth: Vec3 = [
+    cameraRightEarth[0],
+    cameraRightEarth[1],
+    cameraRightEarth[2]
+  ];
   const toGround = (earthVector: Vec3): Vec3 => [
     dot(groundRightEarth, earthVector),
     dot(groundUpEarth, earthVector),
     dot(groundForwardEarth, earthVector)
   ];
-  const cameraRightGround = toGround(cameraRightEarth);
+  const cameraRightGround = toGround(deviceRightEarth);
   const cameraDownGround = toGround(cameraDownEarth);
   const cameraForwardGround = toGround(cameraForwardEarth);
   const groundFromCamera: Mat3 = [
@@ -165,9 +198,15 @@ export function buildCameraFromGroundAtLock(
     groundFromCamera[2], groundFromCamera[5], groundFromCamera[8]
   ];
   const translation: Vec3 = [
-    -cameraFromGround[3] * cameraHeightMeters,
-    -cameraFromGround[4] * cameraHeightMeters,
-    -cameraFromGround[5] * cameraHeightMeters
+    -(cameraFromGround[0] * cameraPositionGround[0] +
+      cameraFromGround[3] * cameraPositionGround[1] +
+      cameraFromGround[6] * cameraPositionGround[2]),
+    -(cameraFromGround[1] * cameraPositionGround[0] +
+      cameraFromGround[4] * cameraPositionGround[1] +
+      cameraFromGround[7] * cameraPositionGround[2]),
+    -(cameraFromGround[2] * cameraPositionGround[0] +
+      cameraFromGround[5] * cameraPositionGround[1] +
+      cameraFromGround[8] * cameraPositionGround[2])
   ];
   return [
     cameraFromGround[0], cameraFromGround[1], cameraFromGround[2], 0,
@@ -175,6 +214,34 @@ export function buildCameraFromGroundAtLock(
     cameraFromGround[6], cameraFromGround[7], cameraFromGround[8], 0,
     translation[0], translation[1], translation[2], 1
   ];
+}
+
+function cameraAxesInEarth(orientation: W3cDeviceOrientation): {
+  cameraRightEarth: Vec3;
+  cameraDownEarth: Vec3;
+  cameraForwardEarth: Vec3;
+} {
+  const deviceToEarth = w3cDeviceToEarthRotation(orientation);
+  const cameraRightEarth: Vec3 = [
+    deviceToEarth[0],
+    deviceToEarth[1],
+    deviceToEarth[2]
+  ];
+  const deviceTopEarth: Vec3 = [
+    deviceToEarth[3],
+    deviceToEarth[4],
+    deviceToEarth[5]
+  ];
+  const deviceFrontEarth: Vec3 = [
+    deviceToEarth[6],
+    deviceToEarth[7],
+    deviceToEarth[8]
+  ];
+  return {
+    cameraRightEarth,
+    cameraDownEarth: negate(deviceTopEarth),
+    cameraForwardEarth: negate(deviceFrontEarth)
+  };
 }
 
 export function projectGroundPoint(

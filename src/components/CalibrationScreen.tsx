@@ -1,4 +1,4 @@
-import { useReducer, useState } from "react";
+import { useEffect, useReducer, useRef, useState } from "react";
 import type {
   CameraIntrinsics,
   GroundCalibration,
@@ -18,21 +18,26 @@ import {
 import type { ImagePixel, Vec3 } from "../geometry/intrinsics";
 
 export type CalibrationFeed = {
-  captureOrientation: () => Promise<{
+  captureOrientation: (cameraHeightMeters?: 1.2 | 1.4 | 1.6) => Promise<{
     samples: readonly OrientationCalibrationSample[];
     cameraFromGroundAtLock: Mat4;
+    earthFromGroundAtLock?: Mat3;
   }>;
   scanFeatures: () => Promise<readonly ScanObservation[]>;
 };
 
 type CalibrationScreenProps = {
   feed: CalibrationFeed;
-  screenPointToGround: (point: ImagePixel) => Vec3 | null;
+  screenPointToGround: (
+    point: ImagePixel,
+    viewport?: { widthPx: number; heightPx: number }
+  ) => Vec3 | null;
   routeNearPoint: RouteGroundPoint;
   intrinsics: CameraIntrinsics;
   imageToScreen: Mat3;
   onLock: (calibration: GroundCalibration) => void;
   onBack: () => void;
+  stream?: MediaStream;
 };
 
 const HEIGHTS = [
@@ -48,8 +53,10 @@ export function CalibrationScreen({
   intrinsics,
   imageToScreen,
   onLock,
-  onBack
+  onBack,
+  stream
 }: CalibrationScreenProps) {
+  const cameraVideo = useRef<HTMLVideoElement>(null);
   const [state, dispatch] = useReducer(
     calibrationReducer,
     undefined,
@@ -58,11 +65,22 @@ export function CalibrationScreen({
   const [busy, setBusy] = useState(false);
   const [localError, setLocalError] = useState<string>();
 
+  useEffect(() => {
+    const video = cameraVideo.current;
+    if (!video || !stream) return;
+    video.srcObject = stream;
+    video.muted = true;
+    void Promise.resolve(video.play()).catch(() => undefined);
+    return () => {
+      video.srcObject = null;
+    };
+  }, [stream, state.stage]);
+
   const captureOrientation = async () => {
     setBusy(true);
     setLocalError(undefined);
     try {
-      const capture = await feed.captureOrientation();
+      const capture = await feed.captureOrientation(state.cameraHeightMeters);
       dispatch({ type: "CAPTURE_ORIENTATION", ...capture });
     } catch {
       setLocalError("Orientation capture failed. Hold still and try again.");
@@ -71,8 +89,11 @@ export function CalibrationScreen({
     }
   };
 
-  const tapRoad = (point: ImagePixel) => {
-    const groundPoint = screenPointToGround(point);
+  const tapRoad = (
+    point: ImagePixel,
+    viewport?: { widthPx: number; heightPx: number }
+  ) => {
+    const groundPoint = screenPointToGround(point, viewport);
     if (!groundPoint) {
       setLocalError("Aim lower at the road so this tap reaches the ground plane.");
       return;
@@ -168,10 +189,26 @@ export function CalibrationScreen({
           type="button"
           className="road-calibration-view"
           aria-label="Road calibration view"
-          onPointerDown={(event) =>
-            tapRoad({ xPx: event.clientX, yPx: event.clientY })
-          }
+          onPointerDown={(event) => {
+            const bounds = event.currentTarget.getBoundingClientRect();
+            tapRoad({
+              xPx: event.clientX - bounds.left,
+              yPx: event.clientY - bounds.top
+            }, {
+              widthPx: bounds.width,
+              heightPx: bounds.height
+            });
+          }}
         >
+          {stream ? (
+            <video
+              ref={cameraVideo}
+              className="calibration-camera"
+              muted
+              playsInline
+              aria-hidden="true"
+            />
+          ) : null}
           <span className="road-guide" aria-hidden="true" />
           {state.nearGround && <span className="tap-marker near" aria-hidden="true" />}
         </button>

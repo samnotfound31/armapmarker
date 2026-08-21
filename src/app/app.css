@@ -41,6 +41,15 @@ input {
   gap: 1rem;
 }
 
+.navigation-shell {
+  width: 100%;
+  min-width: 320px;
+  min-height: 100dvh;
+  position: relative;
+  overflow: hidden;
+  background: #020504;
+}
+
 .hero {
   padding: 0.5rem 0 1.25rem;
 }
@@ -366,6 +375,20 @@ button:disabled {
     #0a160f;
 }
 
+.calibration-camera {
+  width: 100%;
+  height: 100%;
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  object-fit: cover;
+}
+
+.road-calibration-view .road-guide,
+.road-calibration-view .tap-marker {
+  z-index: 1;
+}
+
 .road-guide {
   width: 3px;
   height: 60%;
@@ -434,6 +457,168 @@ button:disabled {
   color: #fff0f0;
   background: rgb(45 5 5 / 92%);
   transform: translate(-50%, -50%);
+}
+
+.navigation-hud {
+  position: absolute;
+  z-index: 3;
+  inset: 0;
+  padding:
+    max(0.85rem, env(safe-area-inset-top))
+    max(0.85rem, env(safe-area-inset-right))
+    max(0.85rem, env(safe-area-inset-bottom))
+    max(0.85rem, env(safe-area-inset-left));
+  pointer-events: none;
+}
+
+.navigation-hud button {
+  pointer-events: auto;
+}
+
+.maneuver-card {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 0.75rem;
+  align-items: center;
+  padding: 0.8rem;
+  border: 1px solid rgb(255 255 255 / 18%);
+  border-radius: 1rem;
+  color: #f5fff8;
+  background: rgb(4 12 8 / 88%);
+  backdrop-filter: blur(0.8rem);
+  box-shadow: 0 0.7rem 2rem rgb(0 0 0 / 32%);
+}
+
+.maneuver-card h2,
+.maneuver-card p {
+  margin: 0;
+}
+
+.maneuver-card h2 {
+  font-size: clamp(1rem, 4.5vw, 1.35rem);
+}
+
+.maneuver-icon {
+  min-width: 2.75rem;
+  color: #5df091;
+  font-size: 2.5rem;
+  line-height: 1;
+  text-align: center;
+}
+
+.maneuver-distance {
+  color: #5df091;
+  font-weight: 850;
+}
+
+.hud-exit {
+  min-height: 2.9rem;
+  padding-inline: 0.85rem;
+  border: 1px solid rgb(255 255 255 / 30%);
+  border-radius: 0.8rem;
+  color: #fff;
+  background: rgb(90 12 12 / 82%);
+  font-weight: 800;
+}
+
+.tracking-chip {
+  width: max-content;
+  margin: 0.65rem 0 0 auto;
+  padding: 0.4rem 0.65rem;
+  border-radius: 999px;
+  color: #061009;
+  background: #5df091;
+  font-size: 0.76rem;
+  font-weight: 850;
+  text-transform: capitalize;
+}
+
+.tracking-chip.is-weak {
+  background: #ffd166;
+}
+
+.tracking-chip.is-realign {
+  color: #fff;
+  background: #b72d3a;
+}
+
+.tracking-warning,
+.off-route-warning {
+  max-width: 32rem;
+  margin: 0.65rem auto 0;
+  padding: 0.75rem;
+  border-radius: 0.85rem;
+  color: #fff8e8;
+  background: rgb(74 45 3 / 92%);
+  pointer-events: auto;
+}
+
+.tracking-warning {
+  display: flex;
+  gap: 0.75rem;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.tracking-warning p,
+.off-route-warning p {
+  margin: 0.25rem 0 0;
+}
+
+.tracking-warning button,
+.off-route-warning button {
+  min-height: 2.75rem;
+  border: 1px solid rgb(255 255 255 / 38%);
+  border-radius: 0.7rem;
+  color: inherit;
+  background: rgb(0 0 0 / 28%);
+  font-weight: 800;
+}
+
+.off-route-warning div {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.65rem;
+}
+
+.walking-safety-label {
+  width: max-content;
+  max-width: 90%;
+  margin: 0;
+  padding: 0.45rem 0.7rem;
+  position: absolute;
+  bottom: max(0.85rem, env(safe-area-inset-bottom));
+  left: 50%;
+  border-radius: 999px;
+  color: #ecfff2;
+  background: rgb(2 8 5 / 78%);
+  font-size: 0.74rem;
+  transform: translateX(-50%);
+}
+
+.arrival-card {
+  display: grid;
+  justify-items: center;
+  gap: 0.75rem;
+  padding: 2rem 1rem;
+  text-align: center;
+}
+
+.arrival-card p,
+.arrival-card h2 {
+  margin: 0;
+}
+
+.arrival-check {
+  display: grid;
+  width: 4.5rem;
+  height: 4.5rem;
+  place-items: center;
+  border-radius: 50%;
+  color: #04150a;
+  background: #5df091;
+  font-size: 2.5rem;
+  font-weight: 900;
 }
 
 @media (min-width: 42rem) {

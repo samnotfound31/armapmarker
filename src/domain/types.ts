@@ -100,6 +100,7 @@ export type GroundCalibration = {
   imageToScreen: Mat3;
   groundFromRoute: Mat4;
   cameraFromGroundAtLock: Mat4;
+  earthFromGroundAtLock?: Mat3;
   calibrationRouteDistanceMeters: number;
   lockedAtMs?: number;
 };

@@ -35,6 +35,7 @@ describe("PoseFusion", () => {
     });
 
     expect(fusion.snapshot(1010).routeProgressMeters).toBe(42);
+    expect(fusion.snapshot(1010).cameraFromGround[14]).toBe(-42);
   });
 
   it("keeps a fresh visual residual while fast sensor pose updates arrive", () => {
@@ -58,7 +59,8 @@ describe("PoseFusion", () => {
     });
 
     const snapshot = fusion.snapshot(1033);
-    expect(snapshot.cameraFromGround).toEqual(rotatedSensor);
+    expect(snapshot.cameraFromGround.slice(0, 12)).toEqual(rotatedSensor.slice(0, 12));
+    expect(snapshot.cameraFromGround[13]).toBeCloseTo(-1.4);
     expect(snapshot.visualCorrection.imageHomography[6]).toBeCloseTo(40);
   });
 

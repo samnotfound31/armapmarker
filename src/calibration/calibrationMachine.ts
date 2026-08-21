@@ -25,6 +25,7 @@ export type CalibrationState = {
   retryReason?: string;
   orientation?: OrientationCalibrationSample;
   cameraFromGroundAtLock?: Mat4;
+  earthFromGroundAtLock?: Mat3;
   nearGround?: Vec3;
   farGround?: Vec3;
   lockedCalibration?: GroundCalibration;
@@ -39,6 +40,7 @@ export type CalibrationEvent =
       type: "CAPTURE_ORIENTATION";
       samples: readonly OrientationCalibrationSample[];
       cameraFromGroundAtLock: Mat4;
+      earthFromGroundAtLock?: Mat3;
     }
   | { type: "TAP_GROUND"; point: Vec3 }
   | { type: "SCAN_OBSERVATION"; observation: ScanObservation }
@@ -90,6 +92,9 @@ export function calibrationReducer(
         stage: "tap-near",
         orientation: averageOrientationSamples(event.samples),
         cameraFromGroundAtLock: event.cameraFromGroundAtLock,
+        ...(event.earthFromGroundAtLock
+          ? { earthFromGroundAtLock: event.earthFromGroundAtLock }
+          : {}),
         retryReason: undefined
       };
     case "TAP_GROUND":
@@ -168,6 +173,9 @@ export function calibrationReducer(
         imageToScreen: event.imageToScreen,
         groundFromRoute: event.groundFromRoute,
         cameraFromGroundAtLock: state.cameraFromGroundAtLock,
+        ...(state.earthFromGroundAtLock
+          ? { earthFromGroundAtLock: state.earthFromGroundAtLock }
+          : {}),
         calibrationRouteDistanceMeters: event.calibrationRouteDistanceMeters,
         lockedAtMs: event.lockedAtMs
       };

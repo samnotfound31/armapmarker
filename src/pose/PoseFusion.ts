@@ -73,13 +73,20 @@ export class PoseFusion {
     this.lastGpsTimestampMs = update.timestampMs;
     this.routeProgressMeters = Math.max(0, update.routeProgressMeters);
     this.cameraPositionGroundMeters = [...update.cameraPositionGroundMeters];
+    this.cameraFromGround = withCameraPosition(
+      this.cameraFromGround,
+      this.cameraPositionGroundMeters
+    );
     return true;
   }
 
   updateSensor(update: SensorPoseUpdate): boolean {
     if (update.timestampMs <= this.lastSensorTimestampMs) return false;
     this.lastSensorTimestampMs = update.timestampMs;
-    this.cameraFromGround = update.cameraFromGround;
+    this.cameraFromGround = withCameraPosition(
+      update.cameraFromGround,
+      this.cameraPositionGroundMeters
+    );
     this.orientationQuaternion = normalizeQuaternion(update.orientationQuaternion);
     return true;
   }
@@ -179,6 +186,22 @@ function normalizeQuaternion(
     number,
     number,
     number
+  ];
+}
+
+function withCameraPosition(
+  cameraFromGround: Mat4,
+  cameraPositionGround: [number, number, number]
+): Mat4 {
+  const [x, y, z] = cameraPositionGround;
+  return [
+    cameraFromGround[0], cameraFromGround[1], cameraFromGround[2], 0,
+    cameraFromGround[4], cameraFromGround[5], cameraFromGround[6], 0,
+    cameraFromGround[8], cameraFromGround[9], cameraFromGround[10], 0,
+    -(cameraFromGround[0] * x + cameraFromGround[4] * y + cameraFromGround[8] * z),
+    -(cameraFromGround[1] * x + cameraFromGround[5] * y + cameraFromGround[9] * z),
+    -(cameraFromGround[2] * x + cameraFromGround[6] * y + cameraFromGround[10] * z),
+    1
   ];
 }
 

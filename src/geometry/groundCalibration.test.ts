@@ -6,6 +6,8 @@ import {
   applyMat4ToPoint,
   averageOrientationSamples,
   buildCameraFromGroundAtLock,
+  buildCameraFromGroundWithEarthFrame,
+  buildEarthFromGroundAtLock,
   fitRouteToGroundTransform,
   intersectImageRayWithGround,
   intersectRayWithGroundPlane,
@@ -99,6 +101,18 @@ describe("projection and orientation averaging", () => {
       expect.closeTo(1.4),
       expect.closeTo(5)
     ]);
+  });
+
+  it("keeps the Earth-ground frame fixed while later yaw changes camera view", () => {
+    const lock = { alphaRad: 0, betaRad: Math.PI / 2, gammaRad: 0 };
+    const earthFromGround = buildEarthFromGroundAtLock(lock);
+    const moved = buildCameraFromGroundWithEarthFrame(
+      { ...lock, alphaRad: Math.PI / 2 },
+      earthFromGround,
+      [0, 1.4, 0]
+    );
+
+    expect(applyMat4ToPoint(moved, [0, 0, 5])[0]).not.toBeCloseTo(0);
   });
 
   it("rejects points behind the camera with a discriminated result", () => {
