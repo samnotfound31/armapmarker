@@ -9,3 +9,5 @@ coverage/
 *.log
 *.tsbuildinfo
 .worktrees/
+test-results/
+playwright-report/

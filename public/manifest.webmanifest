@@ -3,8 +3,18 @@
   "short_name": "AR Walk",
   "description": "Outdoor walking directions projected onto the road through your phone camera.",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
   "orientation": "portrait",
   "background_color": "#07130d",
-  "theme_color": "#07130d"
+  "theme_color": "#07130d",
+  "categories": ["navigation", "travel"],
+  "icons": [
+    {
+      "src": "/icons/app-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
 }

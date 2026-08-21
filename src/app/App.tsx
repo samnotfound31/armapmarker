@@ -5,6 +5,7 @@ import { ArrivalScreen } from "../components/ArrivalScreen";
 import { CalibrationScreen } from "../components/CalibrationScreen";
 import { NavigationHud } from "../components/NavigationHud";
 import { PermissionScreen } from "../components/PermissionScreen";
+import { UpdatePrompt } from "../components/UpdatePrompt";
 import {
   createGoogleRouteMapAdapter,
   RoutePreview,
@@ -360,6 +361,7 @@ export function App({
       : runtimeSnapshot.navigation;
     return (
       <main className="navigation-shell">
+        <UpdatePrompt />
         <ArViewport
           stream={grant.stream}
           route={preparedRoute.groundRoute}
@@ -382,6 +384,7 @@ export function App({
 
   return (
     <main className="app-shell">
+      <UpdatePrompt />
       <section className="hero" aria-labelledby="app-title">
         <p className="eyebrow">Outdoor walking navigation</p>
         <h1 id="app-title">Walk with AR</h1>

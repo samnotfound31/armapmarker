@@ -11,7 +11,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "e2e": "playwright test"
+    "e2e": "playwright test",
+    "e2e:install": "playwright install chromium webkit"
   },
   "dependencies": {
     "@googlemaps/js-api-loader": "^2.1.1",

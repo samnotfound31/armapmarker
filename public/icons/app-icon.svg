@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Walk with AR route arrow">
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#102f1d"/>
+      <stop offset="1" stop-color="#041009"/>
+    </linearGradient>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="10" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#background)"/>
+  <path d="M112 414c54-80 55-148 91-198 34-47 74-68 124-80" fill="none" stroke="#102016" stroke-width="88" stroke-linecap="round"/>
+  <path d="M112 414c54-80 55-148 91-198 34-47 74-68 124-80" fill="none" stroke="#2dfb6f" stroke-width="46" stroke-linecap="round" filter="url(#glow)"/>
+  <path d="m298 76 116 25-78 90-7-54-31-61Z" fill="#2dfb6f" stroke="#06110a" stroke-width="14" stroke-linejoin="round"/>
+  <path d="M103 407h58M151 325h62M190 241h65" stroke="#d9ffe6" stroke-width="14" stroke-linecap="round" opacity=".9"/>
+</svg>
