@@ -106,6 +106,15 @@ export type GroundCalibration = {
 
 export type TrackingState = "locked" | "weak" | "realign";
 
+export type DeviceOrientationSample = {
+  timestampMs: number;
+  headingRad?: number;
+  pitchRad: number;
+  rollRad: number;
+  headingAccuracyDeg?: number;
+  headingSource: "webkit-compass" | "absolute-alpha" | "unavailable";
+};
+
 export type TrackingQuality = {
   state: TrackingState;
   featureCount: number;

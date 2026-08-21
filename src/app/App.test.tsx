@@ -60,6 +60,9 @@ describe("App", () => {
     expect(
       await screen.findByRole("heading", { name: "City Museum" })
     ).toBeVisible();
-    expect(screen.getByRole("button", { name: /start ar walk/i })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: /start ar walk/i }));
+    expect(
+      screen.getByRole("heading", { name: /enable ar access/i })
+    ).toBeVisible();
   });
 });

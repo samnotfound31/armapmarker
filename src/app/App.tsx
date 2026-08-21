@@ -9,7 +9,13 @@ import {
   RoutePreview,
   type RouteMapAdapter
 } from "../components/RoutePreview";
+import { PermissionScreen } from "../components/PermissionScreen";
 import type { Destination, RoutePlan } from "../domain/types";
+import { stopMediaStream } from "../device/camera";
+import {
+  requestArAccess,
+  type ArAccessGrant
+} from "../device/permissions";
 import {
   requestCurrentLocation,
   type LocationFix
@@ -27,6 +33,10 @@ type AppProps = {
     input: WalkingRouteInput,
     signal: AbortSignal
   ) => Promise<RoutePlan>;
+  requestAccess?: (
+    video: HTMLVideoElement,
+    signal: AbortSignal
+  ) => Promise<ArAccessGrant>;
 };
 
 const browserKey = import.meta.env.VITE_GOOGLE_MAPS_BROWSER_KEY ?? "";
@@ -35,7 +45,8 @@ export function App({
   destinationAdapter: providedDestinationAdapter,
   mapAdapter: providedMapAdapter,
   requestLocation = requestCurrentLocation,
-  requestRoute = requestWalkingRoute
+  requestRoute = requestWalkingRoute,
+  requestAccess = requestArAccess
 }: AppProps = {}) {
   const destinationAdapter = useMemo(
     () =>
@@ -53,7 +64,9 @@ export function App({
   const [route, setRoute] = useState<RoutePlan>();
   const [routeLoading, setRouteLoading] = useState(false);
   const [routeError, setRouteError] = useState<string>();
+  const [showPermissions, setShowPermissions] = useState(false);
   const activeRouteRequest = useRef<AbortController | null>(null);
+  const activeArGrant = useRef<ArAccessGrant | null>(null);
 
   const loadRoute = useCallback(
     (origin: LocationFix, destination: Destination) => {
@@ -108,9 +121,21 @@ export function App({
   useEffect(
     () => () => {
       activeRouteRequest.current?.abort();
+      if (activeArGrant.current) {
+        stopMediaStream(activeArGrant.current.stream);
+        activeArGrant.current = null;
+      }
     },
     []
   );
+
+  const leavePermissions = () => {
+    if (activeArGrant.current) {
+      stopMediaStream(activeArGrant.current.stream);
+      activeArGrant.current = null;
+    }
+    setShowPermissions(false);
+  };
 
   return (
     <main className="app-shell">
@@ -130,12 +155,23 @@ export function App({
         </p>
       </aside>
 
-      {route ? (
+      {route && showPermissions ? (
+        <PermissionScreen
+          requestAccess={requestAccess}
+          onReady={(grant) => {
+            activeArGrant.current = grant;
+          }}
+          onBack={leavePermissions}
+        />
+      ) : route ? (
         <RoutePreview
           route={route}
           mapAdapter={mapAdapter}
-          onStart={() => undefined}
-          onBack={() => setRoute(undefined)}
+          onStart={() => setShowPermissions(true)}
+          onBack={() => {
+            setRoute(undefined);
+            setShowPermissions(false);
+          }}
         />
       ) : (
         <>
