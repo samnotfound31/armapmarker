@@ -1,0 +1,167 @@
+:root {
+  color: #f5fff8;
+  background: #07130d;
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  min-width: 320px;
+  min-height: 100dvh;
+  margin: 0;
+  background:
+    radial-gradient(circle at 85% 0%, rgb(54 229 128 / 18%), transparent 34rem),
+    linear-gradient(160deg, #0b1e14 0%, #07130d 64%);
+}
+
+button,
+input {
+  min-height: 44px;
+  font: inherit;
+}
+
+.app-shell {
+  width: min(100%, 42rem);
+  min-height: 100dvh;
+  margin: 0 auto;
+  padding:
+    max(2rem, env(safe-area-inset-top))
+    max(1.25rem, env(safe-area-inset-right))
+    max(2rem, env(safe-area-inset-bottom))
+    max(1.25rem, env(safe-area-inset-left));
+  display: grid;
+  align-content: center;
+  gap: 1rem;
+}
+
+.hero {
+  padding: 0.5rem 0 1.25rem;
+}
+
+.eyebrow,
+.step-label {
+  margin: 0 0 0.6rem;
+  color: #5df091;
+  font-size: 0.78rem;
+  font-weight: 750;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+}
+
+h1,
+h2,
+p {
+  margin-top: 0;
+}
+
+h1 {
+  max-width: 9ch;
+  margin-bottom: 0.8rem;
+  font-size: clamp(3rem, 13vw, 5.6rem);
+  line-height: 0.88;
+  letter-spacing: -0.065em;
+}
+
+.hero-copy {
+  max-width: 35rem;
+  margin-bottom: 0;
+  color: #bad0c1;
+  font-size: 1rem;
+  line-height: 1.55;
+}
+
+.safety-note,
+.search-card {
+  border: 1px solid rgb(153 255 188 / 16%);
+  border-radius: 1.25rem;
+  background: rgb(14 37 25 / 80%);
+  box-shadow: 0 1.5rem 4rem rgb(0 0 0 / 22%);
+  backdrop-filter: blur(18px);
+}
+
+.safety-note {
+  display: flex;
+  gap: 0.8rem;
+  align-items: center;
+  padding: 0.9rem 1rem;
+  color: #d7e9dc;
+}
+
+.safety-note span {
+  display: grid;
+  width: 1.7rem;
+  height: 1.7rem;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid #ffd66b;
+  border-radius: 50%;
+  color: #ffd66b;
+  font-weight: 800;
+}
+
+.safety-note p {
+  margin-bottom: 0;
+  font-size: 0.86rem;
+  line-height: 1.4;
+}
+
+.search-card {
+  display: grid;
+  gap: 0.8rem;
+  padding: 1.25rem;
+}
+
+.search-card h2 {
+  margin-bottom: 0;
+  font-size: 1.3rem;
+  letter-spacing: -0.025em;
+}
+
+.search-card label {
+  color: #d7e9dc;
+  font-size: 0.88rem;
+  font-weight: 700;
+}
+
+.search-card input {
+  width: 100%;
+  padding: 0.85rem 1rem;
+  border: 1px solid #446050;
+  border-radius: 0.85rem;
+  outline: 0;
+  color: #f5fff8;
+  background: #09150e;
+}
+
+.search-card input::placeholder {
+  color: #819889;
+}
+
+.search-card input:focus-visible {
+  border-color: #5df091;
+  box-shadow: 0 0 0 3px rgb(93 240 145 / 20%);
+}
+
+@media (min-width: 42rem) {
+  .app-shell {
+    padding-inline: 2rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}

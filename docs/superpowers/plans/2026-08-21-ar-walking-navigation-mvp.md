@@ -139,11 +139,10 @@ Create `package.json` with these pinned dependency ranges and scripts:
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",
     "@types/three": "^0.185.4",
-    "@vercel/node": "^5.10.2",
     "@vitejs/plugin-react": "^6.1.0",
     "@vitest/coverage-v8": "^4.1.11",
     "eslint": "^10.8.1",
-    "jsdom": "^30.0.1",
+    "jsdom": "^29.0.1",
     "typescript": "6.0.3",
     "typescript-eslint": "^8.67.0",
     "vite": "^8.2.2",
@@ -322,7 +321,7 @@ git commit -m "feat: add metric walking route geometry"
 
 **Interfaces:**
 - Consumes: `Destination`, `GeoPoint`, `RoutePlan` and route decoding from Tasks 1–2.
-- Produces: `routeRequestSchema`, `routePlanSchema`, `requestWalkingRoute(input, signal)`, `loadGoogleLibraries()`, `SearchScreen({ onDestination })`, `RoutePreview({ route, onStart, onBack })`, and Vercel handler `api/routes.ts`.
+- Produces: `routeRequestSchema`, `routePlanSchema`, `requestWalkingRoute(input, signal)`, `loadGoogleLibraries()`, `SearchScreen({ onDestination })`, `RoutePreview({ route, onStart, onBack })`, and a Vercel Web Standard fetch handler in `api/routes.ts`.
 
 - [ ] **Step 1: Write failing schema and request-mapping tests**
 

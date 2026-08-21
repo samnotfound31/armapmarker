@@ -1,0 +1,10 @@
+{
+  "name": "Walk with AR",
+  "short_name": "AR Walk",
+  "description": "Outdoor walking directions projected onto the road through your phone camera.",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#07130d",
+  "theme_color": "#07130d"
+}
