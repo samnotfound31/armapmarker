@@ -116,6 +116,36 @@ export class ProgressSmoother {
   }
 }
 
+export class MonotonicProgressFilter {
+  private valueMeters: number;
+  private initialized = false;
+
+  public constructor(
+    initialMeters = 0,
+    private readonly backwardJitterToleranceMeters = 5
+  ) {
+    this.valueMeters = initialMeters;
+  }
+
+  public update(candidateMeters: number): number {
+    if (!Number.isFinite(candidateMeters)) return this.valueMeters;
+    const candidate = Math.max(0, candidateMeters);
+    if (!this.initialized) {
+      this.valueMeters = candidate;
+      this.initialized = true;
+      return this.valueMeters;
+    }
+    if (
+      candidate < this.valueMeters &&
+      this.valueMeters - candidate <= this.backwardJitterToleranceMeters
+    ) {
+      return this.valueMeters;
+    }
+    this.valueMeters = candidate;
+    return this.valueMeters;
+  }
+}
+
 export function isOffRoute(
   readings: readonly RouteDistanceReading[],
   corridorMeters = 20,

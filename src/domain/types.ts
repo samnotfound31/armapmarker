@@ -134,7 +134,7 @@ export type PoseEstimate = {
   orientationQuaternion: [number, number, number, number];
   cameraFromGround: Mat4;
   visualCorrection: VisualCorrection;
-  displayedRouteProgressMeters: number;
+  routeProgressMeters: number;
   quality: TrackingQuality;
   timestampMs: number;
 };
@@ -145,7 +145,9 @@ export type NavigationStage =
   | "permissions"
   | "calibration"
   | "navigating"
-  | "weak"
-  | "realigning"
+  | "paused"
+  | "permissionError"
+  | "trackingWeak"
+  | "realign"
   | "arrived"
   | "ended";
