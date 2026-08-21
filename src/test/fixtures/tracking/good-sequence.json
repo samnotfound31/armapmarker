@@ -1,0 +1,23 @@
+[
+  {
+    "timestampMs": 1000,
+    "candidateCount": 48,
+    "inlierCount": 36,
+    "medianReprojectionErrorPx": 1.1,
+    "motionValid": true
+  },
+  {
+    "timestampMs": 1033,
+    "candidateCount": 46,
+    "inlierCount": 34,
+    "medianReprojectionErrorPx": 1.3,
+    "motionValid": true
+  },
+  {
+    "timestampMs": 1066,
+    "candidateCount": 44,
+    "inlierCount": 33,
+    "medianReprojectionErrorPx": 1.2,
+    "motionValid": true
+  }
+]

@@ -1,0 +1,37 @@
+[
+  {
+    "timestampMs": 1100,
+    "candidateCount": 24,
+    "inlierCount": 14,
+    "medianReprojectionErrorPx": 2.1,
+    "motionValid": true
+  },
+  {
+    "timestampMs": 1133,
+    "candidateCount": 23,
+    "inlierCount": 13,
+    "medianReprojectionErrorPx": 2.2,
+    "motionValid": true
+  },
+  {
+    "timestampMs": 1166,
+    "candidateCount": 22,
+    "inlierCount": 12,
+    "medianReprojectionErrorPx": 2.4,
+    "motionValid": true
+  },
+  {
+    "timestampMs": 1199,
+    "candidateCount": 21,
+    "inlierCount": 11,
+    "medianReprojectionErrorPx": 2.6,
+    "motionValid": true
+  },
+  {
+    "timestampMs": 1232,
+    "candidateCount": 20,
+    "inlierCount": 10,
+    "medianReprojectionErrorPx": 2.8,
+    "motionValid": true
+  }
+]
