@@ -78,7 +78,9 @@ h1 {
 }
 
 .safety-note,
-.search-card {
+.search-card,
+.preview-card,
+.route-error {
   border: 1px solid rgb(153 255 188 / 16%);
   border-radius: 1.25rem;
   background: rgb(14 37 25 / 80%);
@@ -112,13 +114,15 @@ h1 {
   line-height: 1.4;
 }
 
-.search-card {
+.search-card,
+.preview-card {
   display: grid;
   gap: 0.8rem;
   padding: 1.25rem;
 }
 
-.search-card h2 {
+.search-card h2,
+.preview-card h2 {
   margin-bottom: 0;
   font-size: 1.3rem;
   letter-spacing: -0.025em;
@@ -130,7 +134,8 @@ h1 {
   font-weight: 700;
 }
 
-.search-card input {
+.search-card input,
+.destination-host > * {
   width: 100%;
   padding: 0.85rem 1rem;
   border: 1px solid #446050;
@@ -147,6 +152,110 @@ h1 {
 .search-card input:focus-visible {
   border-color: #5df091;
   box-shadow: 0 0 0 3px rgb(93 240 145 / 20%);
+}
+
+.destination-host:empty {
+  display: none;
+}
+
+.destination-host > * {
+  width: 100%;
+}
+
+.location-row {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.primary-button,
+.secondary-button,
+.text-button {
+  cursor: pointer;
+  border: 0;
+  border-radius: 0.85rem;
+  font-weight: 800;
+}
+
+.primary-button {
+  padding: 0.9rem 1.1rem;
+  color: #04140a;
+  background: #5df091;
+  box-shadow: 0 0.8rem 2rem rgb(32 232 120 / 22%);
+}
+
+.secondary-button {
+  padding: 0.8rem 1rem;
+  color: #eafff0;
+  background: #1d432b;
+}
+
+.text-button {
+  padding-inline: 0.8rem;
+  color: #8ef5b1;
+  background: transparent;
+}
+
+button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.status-line,
+.route-request-status,
+.google-attribution {
+  margin-bottom: 0;
+  color: #98ad9f;
+  font-size: 0.78rem;
+}
+
+.preview-heading {
+  display: flex;
+  gap: 1rem;
+  align-items: start;
+  justify-content: space-between;
+}
+
+.route-map {
+  min-height: 14rem;
+  overflow: hidden;
+  border: 1px solid #345141;
+  border-radius: 1rem;
+  background:
+    linear-gradient(135deg, rgb(93 240 145 / 8%), transparent),
+    #09150e;
+}
+
+.route-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin: 0;
+}
+
+.route-summary div {
+  padding: 0.9rem;
+  border: 1px solid #2f4b3b;
+  border-radius: 0.85rem;
+  background: #09150e;
+}
+
+.route-summary dt {
+  color: #98ad9f;
+  font-size: 0.76rem;
+}
+
+.route-summary dd {
+  margin: 0.25rem 0 0;
+  font-size: 1.2rem;
+  font-weight: 800;
+}
+
+.route-error {
+  padding: 1rem;
+}
+
+.route-error p {
+  margin-bottom: 0.75rem;
 }
 
 @media (min-width: 42rem) {

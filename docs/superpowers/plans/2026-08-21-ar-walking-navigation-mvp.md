@@ -378,7 +378,10 @@ await fetch("https://routes.googleapis.com/directions/v2:computeRoutes", {
     ].join(",")
   },
   body: JSON.stringify({
-    origin: { location: { latLng: input.origin } },
+    origin: { location: { latLng: {
+      latitude: input.origin.lat,
+      longitude: input.origin.lng
+    } } },
     destination: { location: { latLng: {
       latitude: input.destination.lat,
       longitude: input.destination.lng
