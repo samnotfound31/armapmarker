@@ -32,6 +32,16 @@ describe("NavigationEngine", () => {
     );
   });
 
+  it("starts smoothing and monotonic filtering at a nonzero re-alignment match", () => {
+    const engine = new NavigationEngine(ROUTE, STEPS, 100, 60);
+
+    const snapshot = engine.update(input(61, 0, 1000));
+
+    expect(snapshot.routeProgressMeters).toBe(60);
+    expect(snapshot.acceptedGpsProgressMeters).toBe(61);
+    expect(snapshot.remainingDistanceMeters).toBe(40);
+  });
+
   it("ignores small backward GPS jitter but accepts genuine backtracking", () => {
     const engine = new NavigationEngine(ROUTE, STEPS, 100);
     engine.update(input(30, 0, 0));

@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   ROUTES_FIELD_MASK,
   buildGoogleRequest,
+  createClientRateLimiter,
   handleRouteRequest
 } from "./routes";
 
@@ -115,7 +116,8 @@ describe("handleRouteRequest", () => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Origin: "https://app.example"
+          Origin: "https://app.example",
+          "x-vercel-forwarded-for": "203.0.113.10"
         },
         body: JSON.stringify({ padding: "x".repeat(8200) })
       }),
@@ -151,12 +153,62 @@ describe("handleRouteRequest", () => {
 
     expect(response.status).toBe(403);
   });
+
+  it("rate limits a trusted hosting client without logging its IP", async () => {
+    const fetchGoogle = vi.fn<typeof fetch>(async () =>
+      Response.json(googleResponse, { status: 200 })
+    );
+    const log = vi.fn();
+    const limiter = createClientRateLimiter({
+      limit: 2,
+      windowMs: 60_000,
+      maxClients: 10
+    });
+    const dependencies = {
+      apiKey: "secret",
+      fetch: fetchGoogle,
+      log,
+      now: () => 1_000,
+      rateLimiter: limiter
+    };
+
+    expect((await handleRouteRequest(createRequest(input), dependencies)).status).toBe(200);
+    expect((await handleRouteRequest(createRequest(input), dependencies)).status).toBe(200);
+    const limited = await handleRouteRequest(createRequest(input), dependencies);
+
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get("Retry-After")).toBe("60");
+    expect(fetchGoogle).toHaveBeenCalledTimes(2);
+    expect(JSON.stringify(log.mock.calls)).not.toContain("203.0.113.10");
+  });
+
+  it("rejects a missing or spoof-prone client address before routing", async () => {
+    const fetchGoogle = vi.fn();
+    const withoutHostingIp = createRequest(input);
+    withoutHostingIp.headers.delete("x-vercel-forwarded-for");
+    withoutHostingIp.headers.set("x-forwarded-for", "198.51.100.2");
+
+    const response = await handleRouteRequest(withoutHostingIp, {
+      apiKey: "secret",
+      fetch: fetchGoogle,
+      log: vi.fn(),
+      rateLimiter: createClientRateLimiter()
+    });
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ code: "CLIENT_ID_REQUIRED" });
+    expect(fetchGoogle).not.toHaveBeenCalled();
+  });
 });
 
 function createRequest(body: unknown, origin = "https://app.example"): Request {
   return new Request("https://app.example/api/routes", {
     method: "POST",
-    headers: { "Content-Type": "application/json", Origin: origin },
+    headers: {
+      "Content-Type": "application/json",
+      Origin: origin,
+      "x-vercel-forwarded-for": "203.0.113.10"
+    },
     body: JSON.stringify(body)
   });
 }

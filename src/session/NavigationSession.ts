@@ -1,5 +1,6 @@
 import type {
   GroundCalibration,
+  GeoPoint,
   LocalRoutePoint,
   Mat3,
   PoseEstimate,
@@ -18,6 +19,7 @@ import {
   type SensorPoseUpdate as FusionSensorPoseUpdate
 } from "../pose/PoseFusion";
 import { toEnu } from "../route/geo";
+import { sampleRouteGroundPoint } from "../route/prepareRoute";
 import type { TrackerResult } from "../tracking/types";
 
 export type SensorPoseUpdate = FusionSensorPoseUpdate;
@@ -58,11 +60,13 @@ export type NavigationRuntimeSnapshot = {
 
 export type NavigationSessionOptions = {
   route: RoutePlan;
+  enuOrigin?: GeoPoint;
   localRoute: readonly LocalRoutePoint[];
   groundRoute: readonly RouteGroundPoint[];
   calibration: GroundCalibration;
   adapters: NavigationSessionAdapters;
   onUpdate: (snapshot: NavigationRuntimeSnapshot) => void;
+  onLocationAccepted?: (fix: LocationFix, progressMeters: number) => void;
   onUnavailable: (message: string) => void;
   onArrived: (snapshot: NavigationRuntimeSnapshot) => void;
 };
@@ -88,7 +92,8 @@ export class NavigationSession {
     this.engine = new NavigationEngine(
       options.localRoute,
       options.route.steps,
-      options.route.distanceMeters
+      options.route.distanceMeters,
+      options.calibration.calibrationRouteDistanceMeters
     );
   }
 
@@ -132,7 +137,10 @@ export class NavigationSession {
 
   private handleLocation(fix: LocationFix): void {
     if (!this.active) return;
-    const localPosition = toEnu(fix.point, this.options.route.origin);
+    const localPosition = toEnu(
+      fix.point,
+      this.options.enuOrigin ?? this.options.route.origin
+    );
     const destinationOffset = toEnu(this.options.route.destination, fix.point);
     const navigation = this.engine.update({
       position: localPosition,
@@ -146,7 +154,11 @@ export class NavigationSession {
       calibrationDisagreement: this.latestQuality.state === "realign"
     });
     this.latestNavigation = navigation;
-    const routePosition = sampleGroundRoute(
+    this.options.onLocationAccepted?.(
+      fix,
+      navigation.acceptedGpsProgressMeters
+    );
+    const routePosition = sampleRouteGroundPoint(
       this.options.groundRoute,
       navigation.routeProgressMeters
     );
@@ -154,13 +166,26 @@ export class NavigationSession {
       this.options.calibration.groundFromRoute,
       [routePosition.rightMeters, routePosition.upMeters, routePosition.forwardMeters]
     );
+    const calibrationRoutePosition = sampleRouteGroundPoint(
+      this.options.groundRoute,
+      this.options.calibration.calibrationRouteDistanceMeters
+    );
+    const calibrationGroundPosition = applyMat4ToPoint(
+      this.options.calibration.groundFromRoute,
+      [
+        calibrationRoutePosition.rightMeters,
+        calibrationRoutePosition.upMeters,
+        calibrationRoutePosition.forwardMeters
+      ]
+    );
     this.fusion.updateGps({
       timestampMs: fix.timestampMs,
       routeProgressMeters: navigation.routeProgressMeters,
       cameraPositionGroundMeters: [
-        groundPosition[0],
-        groundPosition[1] + this.options.calibration.cameraHeightMeters,
-        groundPosition[2]
+        groundPosition[0] - calibrationGroundPosition[0],
+        groundPosition[1] - calibrationGroundPosition[1] +
+          this.options.calibration.cameraHeightMeters,
+        groundPosition[2] - calibrationGroundPosition[2]
       ]
     });
     const snapshot = this.emit(fix.timestampMs);
@@ -214,7 +239,10 @@ export class NavigationSession {
       throw new Error("Navigation state is unavailable before the first location fix.");
     }
     const snapshot = {
-      pose: this.fusion.snapshot(timestampMs),
+      pose: {
+        ...this.fusion.snapshot(timestampMs),
+        quality: this.latestQuality
+      },
       navigation: {
         ...this.latestNavigation,
         trackingQuality: this.latestQuality
@@ -225,31 +253,6 @@ export class NavigationSession {
   }
 }
 
-function sampleGroundRoute(
-  route: readonly RouteGroundPoint[],
-  progressMeters: number
-): RouteGroundPoint {
-  if (route.length < 2) throw new RangeError("Ground route requires two points.");
-  for (let index = 0; index < route.length - 1; index += 1) {
-    const start = route[index]!;
-    const end = route[index + 1]!;
-    if (progressMeters > end.routeDistanceMeters && index < route.length - 2) continue;
-    const delta = end.routeDistanceMeters - start.routeDistanceMeters;
-    const fraction = delta <= 0 ? 0 : clamp((progressMeters - start.routeDistanceMeters) / delta, 0, 1);
-    return {
-      rightMeters: start.rightMeters + (end.rightMeters - start.rightMeters) * fraction,
-      upMeters: start.upMeters + (end.upMeters - start.upMeters) * fraction,
-      forwardMeters: start.forwardMeters + (end.forwardMeters - start.forwardMeters) * fraction,
-      routeDistanceMeters: start.routeDistanceMeters + delta * fraction
-    };
-  }
-  return route.at(-1)!;
-}
-
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
-}
-
-function clamp(value: number, minimum: number, maximum: number): number {
-  return Math.min(maximum, Math.max(minimum, value));
 }

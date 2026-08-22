@@ -114,17 +114,39 @@ export async function requestArAccess(
       requestCurrentLocation(requestSignal),
     ...overrides
   };
+  let cameraRequest: Promise<MediaStream>;
+  let motionRequest: Promise<
+    | { granted: true; mode: MotionPermissionMode }
+    | { granted: false; error: unknown }
+  >;
+  try {
+    cameraRequest = dependencies.startCamera(video);
+  } catch (error) {
+    if (isAbortError(error) || signal.aborted) throw createAbortError();
+    throw mapCameraError(error);
+  }
+  try {
+    motionRequest = dependencies.requestMotion().then(
+      (mode) => ({ granted: true as const, mode }),
+      (error: unknown) => ({ granted: false as const, error })
+    );
+  } catch (error) {
+    motionRequest = Promise.resolve({ granted: false as const, error });
+  }
+
   let stream: MediaStream;
   try {
-    stream = await dependencies.startCamera(video);
+    stream = await cameraRequest;
   } catch (error) {
+    void motionRequest;
     if (isAbortError(error) || signal.aborted) throw createAbortError();
     throw mapCameraError(error);
   }
 
   try {
     if (signal.aborted) throw createAbortError();
-    await dependencies.requestMotion();
+    const motion = await motionRequest;
+    if (!motion.granted) throw motion.error;
     if (signal.aborted) throw createAbortError();
     const location = await dependencies.requestLocation(signal);
     if (signal.aborted) throw createAbortError();

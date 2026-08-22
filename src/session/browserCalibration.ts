@@ -8,6 +8,9 @@ import {
 } from "../geometry/groundCalibration";
 import {
   createDisplayTransform,
+  readScreenOrientationAngle,
+  resolveDisplayRotation,
+  rotateCameraFromGroundForScreen,
 } from "../geometry/displayTransform";
 import { buildApproximateIntrinsics, type ImagePixel, type Vec3 } from "../geometry/intrinsics";
 import { loadOpenCvTracker, type OpenCvTracker } from "../tracking/OpenCvTracker";
@@ -34,13 +37,19 @@ export function createBrowserCalibrationRuntime(
   const screenWidthPx = Math.max(1, window.innerWidth);
   const screenHeightPx = Math.max(1, window.innerHeight);
   const intrinsics = buildApproximateIntrinsics(imageWidthPx, imageHeightPx);
+  const displayRotation = resolveDisplayRotation(
+    readScreenOrientationAngle(),
+    imageWidthPx,
+    imageHeightPx,
+    screenWidthPx,
+    screenHeightPx
+  );
   const display = createDisplayTransform({
     imageWidthPx,
     imageHeightPx,
     screenWidthPx,
     screenHeightPx,
-    rotationDeg:
-      (imageWidthPx > imageHeightPx) !== (screenWidthPx > screenHeightPx) ? 90 : 0
+    rotationDeg: displayRotation
   });
   const video = document.createElement("video");
   video.srcObject = stream;
@@ -75,9 +84,9 @@ export function createBrowserCalibrationRuntime(
       const orientations = await collectOrientationSamples(5, 4_000);
       const average = averageW3cOrientations(orientations);
       const earthFromGroundAtLock = buildEarthFromGroundAtLock(average);
-      cameraFromGroundAtLock = buildCameraFromGroundAtLock(
-        average,
-        cameraHeightMeters
+      cameraFromGroundAtLock = rotateCameraFromGroundForScreen(
+        buildCameraFromGroundAtLock(average, cameraHeightMeters),
+        displayRotation
       );
       return {
         samples: orientations.map((orientation) => ({
@@ -127,11 +136,13 @@ export function createBrowserCalibrationRuntime(
               imageHeightPx,
               screenWidthPx: viewport.widthPx,
               screenHeightPx: viewport.heightPx,
-              rotationDeg:
-                (imageWidthPx > imageHeightPx) !==
-                (viewport.widthPx > viewport.heightPx)
-                  ? 90
-                  : 0
+              rotationDeg: resolveDisplayRotation(
+                readScreenOrientationAngle(),
+                imageWidthPx,
+                imageHeightPx,
+                viewport.widthPx,
+                viewport.heightPx
+              )
             })
           : display;
       const imagePoint = tapDisplay.screenToImagePoint(point);

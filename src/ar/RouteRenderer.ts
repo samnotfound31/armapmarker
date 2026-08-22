@@ -23,6 +23,7 @@ export type RouteView = {
   visualHomography: Mat3;
   screenWidthPx: number;
   screenHeightPx: number;
+  overlayOpacity: number;
 };
 
 export type RouteRenderBackend = {
@@ -100,7 +101,13 @@ export class RouteRenderer {
       imageToScreen: this.imageToScreen,
       visualHomography: pose.visualCorrection.imageHomography,
       screenWidthPx: this.screenWidthPx,
-      screenHeightPx: this.screenHeightPx
+      screenHeightPx: this.screenHeightPx,
+      overlayOpacity:
+        pose.quality.state === "locked"
+          ? 1
+          : pose.quality.state === "weak"
+            ? 0.5
+            : 0
     });
     this.backend.render();
   }
@@ -170,6 +177,10 @@ class ThreeRouteRenderBackend implements RouteRenderBackend {
   }
 
   updateView(view: RouteView): void {
+    this.mesh.visible = view.overlayOpacity > 0;
+    this.edges.visible = view.overlayOpacity > 0;
+    this.material.opacity = 0.94 * view.overlayOpacity;
+    this.edgeMaterial.opacity = 0.9 * view.overlayOpacity;
     const cvToThree: Mat4 = [
       1, 0, 0, 0,
       0, -1, 0, 0,

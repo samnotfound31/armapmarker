@@ -1,4 +1,4 @@
-import type { Mat3 } from "../domain/types";
+import type { CameraIntrinsics, Mat3 } from "../domain/types";
 
 const EPSILON = 1e-10;
 
@@ -20,6 +20,28 @@ export function computeResidualHomography(
   assertFiniteMatrix(sensorHomography);
   return normalizeHomography(
     multiplyHomographies(observedHomography, invertHomography(sensorHomography))
+  );
+}
+
+export function buildSensorRotationHomography(
+  previousCameraFromGround: Mat3,
+  currentCameraFromGround: Mat3,
+  intrinsics: CameraIntrinsics
+): Mat3 {
+  const cameraDelta = multiplyHomographies(
+    currentCameraFromGround,
+    invertHomography(previousCameraFromGround)
+  );
+  const imageFromCamera: Mat3 = [
+    intrinsics.fxPx, 0, 0,
+    0, intrinsics.fyPx, 0,
+    intrinsics.cxPx, intrinsics.cyPx, 1
+  ];
+  return normalizeHomography(
+    multiplyHomographies(
+      imageFromCamera,
+      multiplyHomographies(cameraDelta, invertHomography(imageFromCamera))
+    )
   );
 }
 

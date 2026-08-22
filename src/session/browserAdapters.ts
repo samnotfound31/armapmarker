@@ -1,9 +1,19 @@
-import type { GroundCalibration, Mat3 } from "../domain/types";
+import type {
+  CameraIntrinsics,
+  GroundCalibration,
+  Mat3,
+  Mat4
+} from "../domain/types";
 import type { LocationFix } from "../device/location";
 import {
   buildCameraFromGroundWithEarthFrame,
   type W3cDeviceOrientation
 } from "../geometry/groundCalibration";
+import {
+  readScreenOrientationAngle,
+  resolveDisplayRotation,
+  rotateCameraFromGroundForScreen
+} from "../geometry/displayTransform";
 import { loadOpenCvTracker } from "../tracking/OpenCvTracker";
 import { TrackerClient } from "../tracking/TrackerClient";
 import type {
@@ -11,17 +21,43 @@ import type {
   SensorPoseUpdate,
   SessionTracker
 } from "./NavigationSession";
+import { buildSensorRotationHomography } from "../tracking/residualHomography";
 
 const IDENTITY_MAT3: Mat3 = [1, 0, 0, 0, 1, 0, 0, 0, 1];
+
+export class SensorFrameHomography {
+  private previousCameraRotation: Mat3 | null = null;
+
+  constructor(private readonly intrinsics: CameraIntrinsics) {}
+
+  next(currentCameraRotation: Mat3): Mat3 {
+    const previous = this.previousCameraRotation;
+    this.previousCameraRotation = currentCameraRotation;
+    return previous
+      ? buildSensorRotationHomography(
+          previous,
+          currentCameraRotation,
+          this.intrinsics
+        )
+      : IDENTITY_MAT3;
+  }
+}
 
 export function createBrowserNavigationAdapters(
   stream: MediaStream,
   calibration: GroundCalibration
 ): NavigationSessionAdapters {
+  let latestCameraRotation: Mat3 | null = null;
   return {
     location: createBrowserLocationSource(),
-    sensor: createBrowserSensorSource(calibration),
-    frames: createBrowserFrameSource(stream),
+    sensor: createBrowserSensorSource(calibration, (rotation) => {
+      latestCameraRotation = rotation;
+    }),
+    frames: createBrowserFrameSource(
+      stream,
+      calibration,
+      () => latestCameraRotation
+    ),
     tracker: new BrowserSessionTracker()
   };
 }
@@ -58,7 +94,8 @@ function createBrowserLocationSource(): NavigationSessionAdapters["location"] {
 }
 
 function createBrowserSensorSource(
-  calibration: GroundCalibration
+  calibration: GroundCalibration,
+  onCameraRotation: (rotation: Mat3) => void
 ): NavigationSessionAdapters["sensor"] {
   return {
     subscribe(listener, onError) {
@@ -75,11 +112,21 @@ function createBrowserSensorSource(
             betaRad: degreesToRadians(event.beta),
             gammaRad: degreesToRadians(event.gamma)
           };
-          const cameraFromGround = buildCameraFromGroundWithEarthFrame(
-            orientation,
-            earthFromGround,
-            [0, calibration.cameraHeightMeters, 0]
+          const cameraFromGround = rotateCameraFromGroundForScreen(
+            buildCameraFromGroundWithEarthFrame(
+              orientation,
+              earthFromGround,
+              [0, calibration.cameraHeightMeters, 0]
+            ),
+            resolveDisplayRotation(
+              readScreenOrientationAngle(),
+              calibration.intrinsics.imageWidthPx,
+              calibration.intrinsics.imageHeightPx,
+              Math.max(1, window.innerWidth),
+              Math.max(1, window.innerHeight)
+            )
           );
+          onCameraRotation(cameraRotation(cameraFromGround));
           listener({
             timestampMs: event.timeStamp || performance.now(),
             cameraFromGround,
@@ -96,7 +143,9 @@ function createBrowserSensorSource(
 }
 
 function createBrowserFrameSource(
-  stream: MediaStream
+  stream: MediaStream,
+  calibration: GroundCalibration,
+  readCameraRotation: () => Mat3 | null
 ): NavigationSessionAdapters["frames"] {
   return {
     subscribe(listener, onError) {
@@ -108,6 +157,7 @@ function createBrowserFrameSource(
       let frameId = 0;
       let framePending = false;
       let lastCaptureMs = Number.NEGATIVE_INFINITY;
+      const sensorFrames = new SensorFrameHomography(calibration.intrinsics);
 
       const capture = async (timestampMs: number) => {
         if (
@@ -124,7 +174,14 @@ function createBrowserFrameSource(
         try {
           const frame = await createImageBitmap(video);
           if (stopped) frame.close();
-          else listener({ frame, timestampMs, sensorHomography: IDENTITY_MAT3 });
+          else {
+            const currentCameraRotation = readCameraRotation();
+            const sensorHomography =
+              currentCameraRotation
+                ? sensorFrames.next(currentCameraRotation)
+                : IDENTITY_MAT3;
+            listener({ frame, timestampMs, sensorHomography });
+          }
         } catch (error) {
           if (!stopped) {
             onError?.(
@@ -155,6 +212,14 @@ function createBrowserFrameSource(
       };
     }
   };
+}
+
+function cameraRotation(matrix: Mat4): Mat3 {
+  return [
+    matrix[0], matrix[1], matrix[2],
+    matrix[4], matrix[5], matrix[6],
+    matrix[8], matrix[9], matrix[10]
+  ];
 }
 
 class BrowserSessionTracker implements SessionTracker {

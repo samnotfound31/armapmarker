@@ -33,6 +33,15 @@ describe("decodeAndSampleRoute", () => {
     expect(route[2]?.northMeters).toBeGreaterThan(1.6);
   });
 
+  it("decodes every route point against an explicit shared ENU origin", () => {
+    const encoded = encode([[0, 0.0001], [0, 0.0002]]);
+
+    const route = decodeAndSampleRoute(encoded, 2.5, { lat: 0, lng: 0 });
+
+    expect(route[0]?.eastMeters).toBeCloseTo(11.1319, 3);
+    expect(route.at(-1)?.eastMeters).toBeCloseTo(22.2639, 3);
+  });
+
   it("rejects invalid spacing and routes with fewer than two points", () => {
     expect(() => decodeAndSampleRoute(encode([[0, 0]]), 2.5)).toThrow(
       /at least two/i

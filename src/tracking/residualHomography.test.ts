@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { Mat3 } from "../domain/types";
 import {
+  buildSensorRotationHomography,
   computeResidualHomography,
   limitVisualResidual,
   multiplyHomographies
 } from "./residualHomography";
+import { applyMat3ToPixel } from "../geometry/displayTransform";
+import { buildApproximateIntrinsics } from "../geometry/intrinsics";
 
 const IDENTITY: Mat3 = [1, 0, 0, 0, 1, 0, 0, 0, 1];
 
@@ -67,5 +70,25 @@ describe("residual homography", () => {
     expect(limited[2]).toBe(0);
     expect(limited[5]).toBe(0);
     expect(limited[8]).toBe(1);
+  });
+
+  it("computes K delta-R K^-1 in full-image pixels", () => {
+    const intrinsics = buildApproximateIntrinsics(1280, 720, 90);
+    const quarterTurn: Mat3 = [
+      0, 1, 0,
+      -1, 0, 0,
+      0, 0, 1
+    ];
+
+    const homography = buildSensorRotationHomography(
+      IDENTITY,
+      quarterTurn,
+      intrinsics
+    );
+
+    expect(applyMat3ToPixel(homography, { xPx: 740, yPx: 360 })).toEqual({
+      xPx: expect.closeTo(640),
+      yPx: expect.closeTo(460)
+    });
   });
 });

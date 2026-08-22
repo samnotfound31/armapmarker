@@ -32,6 +32,23 @@ describe("RouteRenderer", () => {
     ]);
     expect(backend.disposeCount).toBe(1);
   });
+
+  it("fades weak geometry, hides realign geometry, and restores locked opacity", () => {
+    const backend = new FakeRenderer();
+    const renderer = createRenderer(backend);
+
+    renderer.render(pose(0, "locked"));
+    renderer.render(pose(0, "weak"));
+    renderer.render(pose(0, "realign"));
+    renderer.render(pose(0, "locked"));
+
+    expect(backend.viewCalls.map((view) => view.overlayOpacity)).toEqual([
+      1,
+      0.5,
+      0,
+      1
+    ]);
+  });
 });
 
 function createRenderer(backend: FakeRenderer): RouteRenderer {
@@ -64,7 +81,10 @@ function calibration(): GroundCalibration {
   };
 }
 
-function pose(routeProgressMeters: number): PoseEstimate {
+function pose(
+  routeProgressMeters: number,
+  qualityState: PoseEstimate["quality"]["state"] = "locked"
+): PoseEstimate {
   return {
     cameraPositionGroundMeters: [0, 1.4, routeProgressMeters],
     orientationQuaternion: [0, 0, 0, 1],
@@ -72,7 +92,7 @@ function pose(routeProgressMeters: number): PoseEstimate {
     visualCorrection: { imageHomography: IDENTITY_MAT3, keyframeId: 1, timestampMs: 1 },
     routeProgressMeters,
     quality: {
-      state: "locked",
+      state: qualityState,
       featureCount: 40,
       inlierCount: 30,
       inlierRatio: 0.75,

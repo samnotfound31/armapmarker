@@ -51,7 +51,7 @@ export type RouteStep = {
 
 export type RoutePlan = {
   origin: GeoPoint;
-  destination: GeoPoint & { name: string };
+  destination: GeoPoint & { name: string; placeId?: string };
   encodedPolyline: string;
   distanceMeters: number;
   durationSeconds: number;

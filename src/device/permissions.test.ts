@@ -70,30 +70,36 @@ describe("requestMotionPermission", () => {
 });
 
 describe("requestArAccess", () => {
-  it("requests camera, motion, then a fresh location", async () => {
+  it("invokes camera and iOS motion permission before the first await", async () => {
     const order: string[] = [];
     const stream = createStream();
+    let resolveCamera!: (stream: MediaStream) => void;
+    const cameraPending = new Promise<MediaStream>((resolve) => {
+      resolveCamera = resolve;
+    });
 
-    await expect(
-      requestArAccess(
-        document.createElement("video"),
-        new AbortController().signal,
-        {
-          startCamera: async () => {
-            order.push("camera");
-            return stream;
-          },
-          requestMotion: async () => {
-            order.push("motion");
-            return "not-required";
-          },
-          requestLocation: async () => {
-            order.push("location");
-            return location;
-          }
+    const access = requestArAccess(
+      document.createElement("video"),
+      new AbortController().signal,
+      {
+        startCamera: () => {
+          order.push("camera");
+          return cameraPending;
+        },
+        requestMotion: async () => {
+          order.push("motion");
+          return "prompted";
+        },
+        requestLocation: async () => {
+          order.push("location");
+          return location;
         }
-      )
-    ).resolves.toEqual({ stream, location });
+      }
+    );
+
+    expect(order).toEqual(["camera", "motion"]);
+    resolveCamera(stream);
+    await expect(access).resolves.toEqual({ stream, location });
     expect(order).toEqual(["camera", "motion", "location"]);
   });
 
@@ -118,6 +124,29 @@ describe("requestArAccess", () => {
     ).rejects.toEqual(
       expect.objectContaining({ code: "motion-denied" })
     );
+    expect(stop).toHaveBeenCalledOnce();
+  });
+
+  it("stops a pending camera when the motion prompt throws synchronously", async () => {
+    const stop = vi.fn();
+    const stream = createStream(stop);
+
+    await expect(
+      requestArAccess(
+        document.createElement("video"),
+        new AbortController().signal,
+        {
+          startCamera: () => Promise.resolve(stream),
+          requestMotion: () => {
+            throw new ArPermissionError(
+              "motion-denied",
+              "Motion permission was denied."
+            );
+          },
+          requestLocation: vi.fn()
+        }
+      )
+    ).rejects.toEqual(expect.objectContaining({ code: "motion-denied" }));
     expect(stop).toHaveBeenCalledOnce();
   });
 });

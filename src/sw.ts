@@ -1,5 +1,7 @@
 /// <reference lib="webworker" />
 
+import { isSafeStaticRequest } from "./pwa/cachePolicy";
+
 const worker = self as unknown as ServiceWorkerGlobalScope;
 const CACHE_NAME = "ar-walk-shell-v1";
 const OFFLINE_SHELL = ["/", "/manifest.webmanifest", "/icons/app-icon.svg"];
@@ -29,7 +31,7 @@ worker.addEventListener("message", (event) => {
 
 worker.addEventListener("fetch", (event) => {
   const request = event.request;
-  if (!isSafeStaticRequest(request)) return;
+  if (!isSafeStaticRequest(request, worker.location.origin)) return;
 
   if (request.mode === "navigate") {
     event.respondWith(
@@ -52,19 +54,6 @@ worker.addEventListener("fetch", (event) => {
     })
   );
 });
-
-function isSafeStaticRequest(request: Request): boolean {
-  if (request.method !== "GET") return false;
-  const url = new URL(request.url);
-  if (url.origin !== worker.location.origin) return false;
-  if (url.pathname.startsWith("/api/")) return false;
-  return (
-    request.mode === "navigate" ||
-    ["script", "style", "image", "font", "manifest", "worker"].includes(
-      request.destination
-    )
-  );
-}
 
 async function cacheResponse(request: Request, response: Response): Promise<void> {
   if (!response.ok || response.type !== "basic") return;

@@ -16,6 +16,7 @@ import {
   type OrientationCalibrationSample
 } from "../geometry/groundCalibration";
 import type { ImagePixel, Vec3 } from "../geometry/intrinsics";
+import { sampleRouteGroundPoint } from "../route/prepareRoute";
 
 export type CalibrationFeed = {
   captureOrientation: (cameraHeightMeters?: 1.2 | 1.4 | 1.6) => Promise<{
@@ -32,7 +33,8 @@ type CalibrationScreenProps = {
     point: ImagePixel,
     viewport?: { widthPx: number; heightPx: number }
   ) => Vec3 | null;
-  routeNearPoint: RouteGroundPoint;
+  groundRoute: readonly RouteGroundPoint[];
+  calibrationProgressMeters: number;
   intrinsics: CameraIntrinsics;
   imageToScreen: Mat3;
   onLock: (calibration: GroundCalibration) => void;
@@ -49,7 +51,8 @@ const HEIGHTS = [
 export function CalibrationScreen({
   feed,
   screenPointToGround,
-  routeNearPoint,
+  groundRoute,
+  calibrationProgressMeters,
   intrinsics,
   imageToScreen,
   onLock,
@@ -119,6 +122,19 @@ export function CalibrationScreen({
 
   const lockRoute = () => {
     if (!state.nearGround || !state.farGround) return;
+    const directionX = state.farGround[0] - state.nearGround[0];
+    const directionZ = state.farGround[2] - state.nearGround[2];
+    const length = Math.hypot(directionX, directionZ);
+    const direction = [directionX / length, directionZ / length] as const;
+    const projectedNearDistanceMeters = Math.max(
+      0,
+      state.nearGround[0] * direction[0] +
+        state.nearGround[2] * direction[1]
+    );
+    const routeNearPoint = sampleRouteGroundPoint(
+      groundRoute,
+      calibrationProgressMeters + projectedNearDistanceMeters
+    );
     const groundFromRoute = fitRouteToGroundTransform(
       routeNearPoint,
       state.nearGround,
@@ -129,7 +145,7 @@ export function CalibrationScreen({
       intrinsics,
       imageToScreen,
       groundFromRoute,
-      calibrationRouteDistanceMeters: routeNearPoint.routeDistanceMeters,
+      calibrationRouteDistanceMeters: calibrationProgressMeters,
       lockedAtMs: Date.now()
     };
     const locked = calibrationReducer(state, event);

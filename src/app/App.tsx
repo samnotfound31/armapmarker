@@ -19,8 +19,6 @@ import {
 import type {
   Destination,
   GroundCalibration,
-  LocalRoutePoint,
-  RouteGroundPoint,
   RoutePlan,
   TrackingQuality
 } from "../domain/types";
@@ -30,9 +28,10 @@ import { requestArAccess, type ArAccessGrant } from "../device/permissions";
 import { requestWalkingRoute, type WalkingRouteInput } from "../google/routeClient";
 import { selectNextManeuver } from "../navigation/navigationEngine";
 import { PoseFusion } from "../pose/PoseFusion";
-import { toEnu } from "../route/geo";
-import { decodeAndSampleRoute } from "../route/polyline";
-import { nearestRouteProgress } from "../route/progress";
+import {
+  prepareRoute,
+  type PreparedRoute
+} from "../route/prepareRoute";
 import {
   NavigationSession,
   type NavigationRuntimeSnapshot,
@@ -83,13 +82,8 @@ type AppStage =
   | "permissions"
   | "calibration"
   | "navigating"
+  | "paused"
   | "arrived";
-
-type PreparedRoute = {
-  localRoute: LocalRoutePoint[];
-  groundRoute: RouteGroundPoint[];
-  routeNearPoint: RouteGroundPoint;
-};
 
 const browserKey = import.meta.env.VITE_GOOGLE_MAPS_BROWSER_KEY ?? "";
 const INITIAL_QUALITY: TrackingQuality = {
@@ -146,6 +140,14 @@ export function App({
   const activeArGrant = useRef<ArAccessGrant | null>(null);
   const activeCalibrationRuntime = useRef<CalibrationRuntime | null>(null);
   const activeSession = useRef<NavigationSessionLike | null>(null);
+  const originFixRef = useRef<LocationFix | undefined>(originFix);
+  const latestAcceptedFix = useRef<LocationFix | undefined>(originFix);
+  const latestAcceptedProgressMeters = useRef(restored?.displayedProgressMeters ?? 0);
+  const stageRef = useRef(stage);
+  const routeRef = useRef(route);
+  const visibilityInvalidated = useRef(false);
+  stageRef.current = stage;
+  routeRef.current = route;
 
   const loadRoute = useCallback(
     (origin: LocationFix, destination: Destination) => {
@@ -182,17 +184,20 @@ export function App({
   const chooseDestination = useCallback(
     (destination: Destination) => {
       setSelectedDestination(destination);
-      if (!originFix) {
+      const currentOrigin = originFixRef.current;
+      if (!currentOrigin) {
         setRouteError("Use your current location before calculating the route.");
         return;
       }
-      loadRoute(originFix, destination);
+      loadRoute(currentOrigin, destination);
     },
-    [loadRoute, originFix]
+    [loadRoute]
   );
 
   const chooseOrigin = useCallback(
     (fix: LocationFix) => {
+      originFixRef.current = fix;
+      latestAcceptedFix.current = fix;
       setOriginFix(fix);
       if (selectedDestination) loadRoute(fix, selectedDestination);
     },
@@ -249,7 +254,10 @@ export function App({
       return;
     }
     try {
+      latestAcceptedFix.current = nextGrant.location;
       const nextPreparedRoute = prepareRoute(route, nextGrant.location);
+      latestAcceptedProgressMeters.current =
+        nextPreparedRoute.calibrationProgressMeters;
       const runtime = calibrationFactory(nextGrant);
       activeArGrant.current = nextGrant;
       activeCalibrationRuntime.current = runtime;
@@ -257,7 +265,11 @@ export function App({
       setPreparedRoute(nextPreparedRoute);
       setCalibrationRuntime(runtime);
       setStage("calibration");
-      store.save({ route, stage: "calibration", displayedProgressMeters: 0 });
+      store.save({
+        route,
+        stage: "calibration",
+        displayedProgressMeters: nextPreparedRoute.calibrationProgressMeters
+      });
     } catch (error) {
       stopMediaStream(nextGrant.stream);
       setCompatibilityMessage(
@@ -280,11 +292,14 @@ export function App({
     };
     const session = sessionFactory({
       route,
+      enuOrigin: preparedRoute.enuOrigin,
       localRoute: preparedRoute.localRoute,
       groundRoute: preparedRoute.groundRoute,
       calibration: lockedCalibration,
       grant,
       onUpdate: (snapshot) => {
+        latestAcceptedProgressMeters.current =
+          snapshot.navigation.acceptedGpsProgressMeters;
         setRuntimeSnapshot(snapshot);
         if (!snapshot.navigation.offRoute) setDismissedOffRoute(false);
         store.save({
@@ -292,6 +307,11 @@ export function App({
           stage: "navigating",
           displayedProgressMeters: snapshot.navigation.routeProgressMeters
         });
+      },
+      onLocationAccepted: (fix, progressMeters) => {
+        latestAcceptedFix.current = fix;
+        originFixRef.current = fix;
+        latestAcceptedProgressMeters.current = progressMeters;
       },
       onUnavailable: handleUnavailable,
       onArrived: (snapshot) => {
@@ -322,17 +342,154 @@ export function App({
     setRuntimeSnapshot(undefined);
     setCalibration(undefined);
     try {
+      const nextPreparedRoute = prepareRoute(
+        route,
+        latestAcceptedFix.current ?? grant.location
+      );
       const runtime = calibrationFactory(grant);
       activeCalibrationRuntime.current = runtime;
+      setPreparedRoute(nextPreparedRoute);
       setCalibrationRuntime(runtime);
       setStage("calibration");
-      store.save({ route, stage: "calibration", displayedProgressMeters: 0 });
+      store.save({
+        route,
+        stage: "calibration",
+        displayedProgressMeters: nextPreparedRoute.calibrationProgressMeters
+      });
     } catch (error) {
       returnToPreview(
         error instanceof Error ? error.message : "Re-alignment could not start."
       );
     }
   };
+
+  const recalculateRoute = () => {
+    if (!route) return;
+    const destination =
+      selectedDestination ??
+      (route.destination.placeId
+        ? {
+            placeId: route.destination.placeId,
+            name: route.destination.name,
+            formattedAddress: route.destination.name,
+            location: route.destination
+          }
+        : undefined);
+    if (!destination) {
+      returnToPreview(
+        "This restored route cannot be recalculated without selecting the destination again."
+      );
+      return;
+    }
+
+    releaseSession();
+    releaseCalibrationRuntime();
+    releaseGrant();
+    setCalibration(undefined);
+    setRuntimeSnapshot(undefined);
+    setStage("preview");
+    setCompatibilityMessage("Calculating a fresh walking route…");
+    activeRouteRequest.current?.abort();
+    const controller = new AbortController();
+    activeRouteRequest.current = controller;
+    void requestLocation(controller.signal)
+      .then(async (fix) => {
+        const nextRoute = await requestRoute(
+          { origin: fix.point, destination },
+          controller.signal
+        );
+        return { fix, nextRoute };
+      })
+      .then(({ fix, nextRoute }) => {
+        if (controller.signal.aborted) return;
+        latestAcceptedFix.current = fix;
+        originFixRef.current = fix;
+        latestAcceptedProgressMeters.current = 0;
+        setOriginFix(fix);
+        setSelectedDestination(destination);
+        setRoute(nextRoute);
+        setPreparedRoute(undefined);
+        setCompatibilityMessage(undefined);
+        store.save({
+          route: nextRoute,
+          stage: "preview",
+          displayedProgressMeters: 0
+        });
+      })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) return;
+        setCompatibilityMessage(
+          error instanceof Error
+            ? error.message
+            : "A fresh route could not be loaded."
+        );
+      });
+  };
+
+  useEffect(() => {
+    const suspend = () => {
+      if (stageRef.current !== "navigating") return;
+      const currentRoute = routeRef.current;
+      visibilityInvalidated.current = true;
+      releaseSession();
+      releaseCalibrationRuntime();
+      setCalibration(undefined);
+      setRuntimeSnapshot(undefined);
+      setStage("paused");
+      if (activeArGrant.current) {
+        setMediaStreamEnabled(activeArGrant.current.stream, false);
+      }
+      if (currentRoute) {
+        store.save({
+          route: currentRoute,
+          stage: "calibration",
+          displayedProgressMeters: latestAcceptedProgressMeters.current
+        });
+      }
+    };
+    const resume = () => {
+      if (!visibilityInvalidated.current) return;
+      visibilityInvalidated.current = false;
+      const currentGrant = activeArGrant.current;
+      const currentRoute = routeRef.current;
+      if (!currentGrant || !currentRoute) return;
+      try {
+        setMediaStreamEnabled(currentGrant.stream, true);
+        const nextPreparedRoute = prepareRoute(
+          currentRoute,
+          latestAcceptedFix.current ?? currentGrant.location
+        );
+        const runtime = calibrationFactory(currentGrant);
+        activeCalibrationRuntime.current = runtime;
+        setPreparedRoute(nextPreparedRoute);
+        setCalibrationRuntime(runtime);
+        setStage("calibration");
+      } catch (error) {
+        releaseGrant();
+        setCompatibilityMessage(
+          error instanceof Error
+            ? error.message
+            : "Re-alignment could not resume."
+        );
+        setStage("preview");
+      }
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") suspend();
+      else resume();
+    };
+    const onOrientationChange = () => {
+      suspend();
+      resume();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    const orientation = globalThis.screen?.orientation;
+    orientation?.addEventListener?.("change", onOrientationChange);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      orientation?.removeEventListener?.("change", onOrientationChange);
+    };
+  }, [calibrationFactory, store]);
 
   const endWalk = () => {
     releaseSession();
@@ -374,9 +531,7 @@ export function App({
           onExit={endWalk}
           onRealign={realign}
           onKeepRoute={() => setDismissedOffRoute(true)}
-          onRecalculate={() =>
-            returnToPreview("Route recalculation is ready from the preview screen.")
-          }
+          onRecalculate={recalculateRoute}
         />
       </main>
     );
@@ -401,11 +556,17 @@ export function App({
 
       {stage === "arrived" && route ? (
         <ArrivalScreen destinationName={route.destination.name} onDone={endWalk} />
+      ) : stage === "paused" ? (
+        <section className="permission-card" aria-live="polite">
+          <h2>Navigation paused</h2>
+          <p>Return to the app to re-align the route before guidance resumes.</p>
+        </section>
       ) : stage === "calibration" && route && grant && preparedRoute && calibrationRuntime ? (
         <CalibrationScreen
           feed={calibrationRuntime.feed}
           screenPointToGround={calibrationRuntime.screenPointToGround}
-          routeNearPoint={preparedRoute.routeNearPoint}
+          groundRoute={preparedRoute.groundRoute}
+          calibrationProgressMeters={preparedRoute.calibrationProgressMeters}
           intrinsics={calibrationRuntime.intrinsics}
           imageToScreen={calibrationRuntime.imageToScreen}
           onLock={startNavigation}
@@ -470,6 +631,10 @@ export function App({
   );
 }
 
+function setMediaStreamEnabled(stream: MediaStream, enabled: boolean): void {
+  for (const track of stream.getTracks()) track.enabled = enabled;
+}
+
 function createDefaultSession(
   input: AppNavigationSessionInput
 ): NavigationSessionLike {
@@ -478,24 +643,6 @@ function createDefaultSession(
     ...options,
     adapters: createBrowserNavigationAdapters(grant.stream, input.calibration)
   });
-}
-
-function prepareRoute(route: RoutePlan, fix: LocationFix): PreparedRoute {
-  const localRoute = decodeAndSampleRoute(route.encodedPolyline, 2.5);
-  const groundRoute = localRoute.map<RouteGroundPoint>((point) => ({
-    rightMeters: point.eastMeters,
-    upMeters: point.upMeters,
-    forwardMeters: point.northMeters,
-    routeDistanceMeters: point.routeDistanceMeters
-  }));
-  const match = nearestRouteProgress(toEnu(fix.point, route.origin), localRoute);
-  const routeNearPoint = groundRoute.reduce((nearest, point) =>
-    Math.abs(point.routeDistanceMeters - match.progressMeters) <
-    Math.abs(nearest.routeDistanceMeters - match.progressMeters)
-      ? point
-      : nearest
-  );
-  return { localRoute, groundRoute, routeNearPoint };
 }
 
 function createInitialSnapshot(

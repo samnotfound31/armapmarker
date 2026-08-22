@@ -1,6 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { buildApproximateIntrinsics } from "../geometry/intrinsics";
+import { applyMat4ToPoint } from "../geometry/groundCalibration";
 import { IDENTITY_MAT3, IDENTITY_MAT4 } from "../test/geometryFixtures";
 import { CalibrationScreen, type CalibrationFeed } from "./CalibrationScreen";
 
@@ -28,12 +29,8 @@ describe("CalibrationScreen", () => {
       <CalibrationScreen
         feed={feed}
         screenPointToGround={({ yPx }) => (yPx < 200 ? [0, 0, 3] : [0, 0, 6])}
-        routeNearPoint={{
-          rightMeters: 0,
-          upMeters: 0,
-          forwardMeters: 3,
-          routeDistanceMeters: 10
-        }}
+        groundRoute={groundRoute()}
+        calibrationProgressMeters={10}
         intrinsics={buildApproximateIntrinsics(1920, 1080)}
         imageToScreen={IDENTITY_MAT3}
         onLock={onLock}
@@ -58,6 +55,18 @@ describe("CalibrationScreen", () => {
     expect(onLock).toHaveBeenCalledWith(
       expect.objectContaining({ stage: "locked", cameraHeightMeters: 1.4 })
     );
+    const calibration = onLock.mock.lastCall?.[0];
+    expect(calibration.calibrationRouteDistanceMeters).toBe(10);
+    expect(applyMat4ToPoint(calibration.groundFromRoute, [0, 0, 0])).toEqual([
+      expect.closeTo(0),
+      0,
+      expect.closeTo(0)
+    ]);
+    expect(applyMat4ToPoint(calibration.groundFromRoute, [0, 0, 3])).toEqual([
+      expect.closeTo(0),
+      0,
+      expect.closeTo(3)
+    ]);
   });
 
   it("keeps the tap stage and explains an invalid road ray", async () => {
@@ -65,12 +74,8 @@ describe("CalibrationScreen", () => {
       <CalibrationScreen
         feed={feed}
         screenPointToGround={() => null}
-        routeNearPoint={{
-          rightMeters: 0,
-          upMeters: 0,
-          forwardMeters: 3,
-          routeDistanceMeters: 10
-        }}
+        groundRoute={groundRoute()}
+        calibrationProgressMeters={10}
         intrinsics={buildApproximateIntrinsics(1920, 1080)}
         imageToScreen={IDENTITY_MAT3}
         onLock={vi.fn()}
@@ -90,3 +95,11 @@ describe("CalibrationScreen", () => {
     expect(screen.getByText(/tap a near point/i)).toBeVisible();
   });
 });
+
+function groundRoute() {
+  return [
+    { rightMeters: 0, upMeters: 0, forwardMeters: -10, routeDistanceMeters: 0 },
+    { rightMeters: 0, upMeters: 0, forwardMeters: 0, routeDistanceMeters: 10 },
+    { rightMeters: 0, upMeters: 0, forwardMeters: 10, routeDistanceMeters: 20 }
+  ];
+}

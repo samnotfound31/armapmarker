@@ -45,7 +45,10 @@ export const routeApiResponseSchema = z
   .strict();
 
 export const routePlanSchema = routeApiResponseSchema.extend({
-  destination: geoPointSchema.extend({ name: z.string().trim().min(1) })
+  destination: geoPointSchema.extend({
+    name: z.string().trim().min(1),
+    placeId: z.string().trim().min(1).max(512).optional()
+  })
 });
 
 export type RouteRequestInput = z.infer<typeof routeRequestSchema>;

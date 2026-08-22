@@ -27,6 +27,7 @@ export class FakeRenderer implements RouteRenderBackend {
     visualHomography: Mat3;
     screenWidthPx: number;
     screenHeightPx: number;
+    overlayOpacity: number;
   }): void {
     this.viewCalls.push(view);
   }

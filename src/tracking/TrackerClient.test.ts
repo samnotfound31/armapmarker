@@ -55,6 +55,26 @@ describe("TrackerClient", () => {
     client.dispose();
   });
 
+  it("terminates and reports a worker that becomes unavailable after startup", async () => {
+    const worker = new FakeWorker();
+    const onUnavailable = vi.fn();
+    const client = new TrackerClient({
+      workerFactory: () => worker,
+      mainThreadFactory: vi.fn(),
+      onResult: vi.fn(),
+      onUnavailable
+    });
+    const start = client.start();
+    worker.emit({ type: "ready" });
+    await start;
+
+    worker.emit({ type: "unavailable", message: "Worker tracking failed" });
+
+    expect(client.status).toBe("unavailable");
+    expect(worker.terminate).toHaveBeenCalledOnce();
+    expect(onUnavailable).toHaveBeenCalledWith("Worker tracking failed");
+  });
+
   it("uses reduced-cadence main-thread tracking without worker support", async () => {
     const process = vi.fn(async (_frame, timestampMs) => trackedResult(timestampMs));
     const dispose = vi.fn();
@@ -83,12 +103,17 @@ describe("TrackerClient", () => {
     expect(dispose).toHaveBeenCalledOnce();
   });
 
-  it("reports OpenCV initialization failure as unavailable", async () => {
+  it("terminates a failed worker and falls back to main-thread tracking once", async () => {
     const worker = new FakeWorker();
     const onUnavailable = vi.fn();
+    const tracker: MainThreadTracker = {
+      process: vi.fn(async (_frame, timestampMs) => trackedResult(timestampMs)),
+      dispose: vi.fn()
+    };
+    const mainThreadFactory = vi.fn(async () => tracker);
     const client = new TrackerClient({
       workerFactory: () => worker,
-      mainThreadFactory: vi.fn(),
+      mainThreadFactory,
       onResult: vi.fn(),
       onUnavailable
     });
@@ -96,9 +121,35 @@ describe("TrackerClient", () => {
     const start = client.start();
     worker.emit({ type: "unavailable", message: "OpenCV could not initialize" });
 
-    await expect(start).rejects.toThrow("OpenCV could not initialize");
+    await expect(start).resolves.toBeUndefined();
+    expect(worker.terminate).toHaveBeenCalledOnce();
+    expect(mainThreadFactory).toHaveBeenCalledOnce();
+    expect(client.status).toBe("ready");
+    expect(onUnavailable).not.toHaveBeenCalled();
+    client.dispose();
+  });
+
+  it("reports unavailable only after worker and main-thread initialization both fail", async () => {
+    const worker = new FakeWorker();
+    const onUnavailable = vi.fn();
+    const mainThreadFactory = vi.fn(async () => {
+      throw new Error("Main-thread OpenCV failed");
+    });
+    const client = new TrackerClient({
+      workerFactory: () => worker,
+      mainThreadFactory,
+      onResult: vi.fn(),
+      onUnavailable
+    });
+
+    const start = client.start();
+    worker.emit({ type: "unavailable", message: "Worker OpenCV failed" });
+
+    await expect(start).rejects.toThrow("Main-thread OpenCV failed");
+    expect(worker.terminate).toHaveBeenCalledOnce();
+    expect(mainThreadFactory).toHaveBeenCalledOnce();
     expect(client.status).toBe("unavailable");
-    expect(onUnavailable).toHaveBeenCalledWith("OpenCV could not initialize");
+    expect(onUnavailable).toHaveBeenCalledWith("Main-thread OpenCV failed");
   });
 });
 

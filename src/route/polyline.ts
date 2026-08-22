@@ -6,7 +6,8 @@ const DISTANCE_EPSILON_METERS = 1e-6;
 
 export function decodeAndSampleRoute(
   encoded: string,
-  spacingMeters: number
+  spacingMeters: number,
+  enuOrigin?: GeoPoint
 ): LocalRoutePoint[] {
   if (!Number.isFinite(spacingMeters) || spacingMeters <= 0) {
     throw new RangeError("Route sample spacing must be greater than zero");
@@ -18,7 +19,10 @@ export function decodeAndSampleRoute(
   }
 
   const firstCoordinate = decoded[0]!;
-  const origin: GeoPoint = { lat: firstCoordinate[0], lng: firstCoordinate[1] };
+  const origin: GeoPoint = enuOrigin ?? {
+    lat: firstCoordinate[0],
+    lng: firstCoordinate[1]
+  };
   const source = decoded.map(([lat, lng]) => toEnu({ lat, lng }, origin));
   const firstPoint = source[0]!;
   const samples: LocalRoutePoint[] = [withRouteDistance(firstPoint, 0)];

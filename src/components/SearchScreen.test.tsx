@@ -100,6 +100,48 @@ describe("SearchScreen", () => {
     );
   });
 
+  it("keeps one autocomplete mount and selects with the latest callback after location becomes ready", async () => {
+    let select: (() => void) | undefined;
+    const dispose = vi.fn();
+    const adapter: DestinationSearchAdapter = {
+      mount: vi.fn((_host, callbacks) => {
+        select = () => callbacks.onSelect(destination);
+        return dispose;
+      })
+    };
+    const firstSelection = vi.fn();
+    const latestSelection = vi.fn();
+    const requestLocation = vi.fn(async () => ({
+      point: { lat: 22.57, lng: 88.36 },
+      accuracyMeters: 5,
+      timestampMs: 1000
+    }));
+    const { rerender } = render(
+      <SearchScreen
+        destinationAdapter={adapter}
+        requestLocation={requestLocation}
+        onLocation={vi.fn()}
+        onDestination={firstSelection}
+      />
+    );
+
+    rerender(
+      <SearchScreen
+        destinationAdapter={adapter}
+        requestLocation={requestLocation}
+        onLocation={vi.fn()}
+        onDestination={latestSelection}
+        origin={{ lat: 22.57, lng: 88.36 }}
+      />
+    );
+    select?.();
+
+    expect(adapter.mount).toHaveBeenCalledOnce();
+    expect(dispose).not.toHaveBeenCalled();
+    expect(firstSelection).not.toHaveBeenCalled();
+    expect(latestSelection).toHaveBeenCalledWith(destination);
+  });
+
   it("keeps destination search available after location denial", async () => {
     render(
       <SearchScreen

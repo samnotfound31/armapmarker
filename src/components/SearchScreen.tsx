@@ -103,6 +103,8 @@ export function SearchScreen({
 }: SearchScreenProps) {
   const destinationHost = useRef<HTMLDivElement>(null);
   const locationRequest = useRef<AbortController | null>(null);
+  const onDestinationRef = useRef(onDestination);
+  const originRef = useRef(origin);
   const [destinationReady, setDestinationReady] = useState(false);
   const [destinationError, setDestinationError] = useState<string>();
   const [locationStatus, setLocationStatus] = useState<
@@ -110,6 +112,9 @@ export function SearchScreen({
   >(origin ? "ready" : "idle");
   const [locationAccuracy, setLocationAccuracy] = useState<number>();
   const [locationError, setLocationError] = useState<string>();
+
+  onDestinationRef.current = onDestination;
+  originRef.current = origin;
 
   useEffect(() => {
     const host = destinationHost.current;
@@ -121,8 +126,8 @@ export function SearchScreen({
     setDestinationError(undefined);
     Promise.resolve(
       destinationAdapter.mount(host, {
-        origin,
-        onSelect: onDestination,
+        origin: originRef.current,
+        onSelect: (destination) => onDestinationRef.current(destination),
         onError: setDestinationError
       })
     )
@@ -149,7 +154,7 @@ export function SearchScreen({
       dispose?.();
       host.replaceChildren();
     };
-  }, [destinationAdapter, onDestination, origin]);
+  }, [destinationAdapter]);
 
   useEffect(
     () => () => {

@@ -61,7 +61,8 @@ export async function requestWalkingRoute(
     ...apiRoute,
     destination: {
       ...apiRoute.destination,
-      name: input.destination.name
+      name: input.destination.name,
+      placeId: input.destination.placeId
     }
   });
 }

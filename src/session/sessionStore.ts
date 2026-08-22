@@ -77,6 +77,8 @@ function isRoutePlan(value: unknown): value is RoutePlan {
     isRecord(value.destination) &&
     isGeoPoint(value.destination) &&
     typeof value.destination.name === "string" &&
+    (value.destination.placeId === undefined ||
+      typeof value.destination.placeId === "string") &&
     typeof value.encodedPolyline === "string" &&
     isFiniteNonNegative(value.distanceMeters) &&
     isFiniteNonNegative(value.durationSeconds) &&

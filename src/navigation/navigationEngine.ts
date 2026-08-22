@@ -45,8 +45,8 @@ const OFF_ROUTE_RECOVERY_FIXES = 2;
 const REALIGN_DISAGREEMENT_FRAMES = 10;
 
 export class NavigationEngine {
-  private readonly smoother = new ProgressSmoother(0, 1.5);
-  private readonly progressFilter = new MonotonicProgressFilter(0, 5);
+  private readonly smoother: ProgressSmoother;
+  private readonly progressFilter: MonotonicProgressFilter;
   private lastTimestampMs: number | null = null;
   private offRouteFixes = 0;
   private recoveryFixes = 0;
@@ -57,12 +57,15 @@ export class NavigationEngine {
   constructor(
     private readonly route: readonly LocalRoutePoint[],
     private readonly steps: readonly RouteStep[],
-    private readonly routeDistanceMeters: number
+    private readonly routeDistanceMeters: number,
+    initialProgressMeters = 0
   ) {
     if (route.length < 2) throw new RangeError("Navigation requires a route segment.");
     if (!Number.isFinite(routeDistanceMeters) || routeDistanceMeters <= 0) {
       throw new RangeError("Navigation route distance must be positive.");
     }
+    this.smoother = new ProgressSmoother(initialProgressMeters, 1.5);
+    this.progressFilter = new MonotonicProgressFilter(initialProgressMeters, 5);
   }
 
   update(input: NavigationEngineInput): NavigationSnapshot {

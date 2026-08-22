@@ -1,5 +1,5 @@
 import { encode } from "@googlemaps/polyline-codec";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Destination, PoseEstimate } from "../domain/types";
 import type { NavigationSnapshot } from "../navigation/navigationEngine";
@@ -23,6 +23,14 @@ const destination: Destination = {
 describe("App integrated AR walk", () => {
   beforeEach(() => {
     sessionStorage.clear();
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      value: "visible"
+    });
+    Object.defineProperty(globalThis.screen, "orientation", {
+      configurable: true,
+      value: undefined
+    });
     vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue();
     vi.stubGlobal(
       "ResizeObserver",
@@ -166,6 +174,103 @@ describe("App integrated AR walk", () => {
     expect(screen.getByRole("alert")).toHaveTextContent(/opencv could not initialize/i);
     expect(screen.queryByLabelText(/augmented reality navigation view/i)).not.toBeInTheDocument();
   });
+
+  it("recomputes a nonzero calibration match from the latest accepted fix on re-alignment", async () => {
+    const recovery = await setupRecoveryApp();
+    recovery.sessionInputs[0]?.onLocationAccepted?.(
+      recovery.freshFix,
+      50
+    );
+    const lost = runtimeSnapshot(50, 50, false);
+    lost.navigation.trackingQuality = {
+      ...lost.navigation.trackingQuality,
+      state: "realign"
+    };
+    lost.pose.quality = lost.navigation.trackingQuality;
+    recovery.sessionInputs[0]?.onUpdate(lost);
+
+    fireEvent.click(await screen.findByRole("button", { name: /^re-align$/i }));
+    await completeCalibration();
+
+    expect(recovery.sessionInputs).toHaveLength(2);
+    expect(
+      recovery.sessionInputs[1]?.calibration.calibrationRouteDistanceMeters
+    ).toBeCloseTo(50, 0);
+  });
+
+  it("gets a fresh fix and replaces the route when recalculation succeeds", async () => {
+    const recovery = await setupRecoveryApp();
+    const offRoute = runtimeSnapshot(35, 65, false);
+    offRoute.navigation.offRoute = true;
+    recovery.sessionInputs[0]?.onUpdate(offRoute);
+
+    fireEvent.click(await screen.findByRole("button", { name: /^recalculate$/i }));
+
+    await waitFor(() => expect(recovery.requestLocation).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(recovery.requestRoute).toHaveBeenCalledTimes(2));
+    expect(recovery.requestRoute.mock.calls[1]?.[0].origin).toEqual(
+      recovery.freshFix.point
+    );
+    expect(await screen.findByRole("heading", { name: "City Museum" })).toBeVisible();
+  });
+
+  it("keeps the existing route preview and explains recalculation failure", async () => {
+    const recovery = await setupRecoveryApp({ failRecalculation: true });
+    const offRoute = runtimeSnapshot(35, 65, false);
+    offRoute.navigation.offRoute = true;
+    recovery.sessionInputs[0]?.onUpdate(offRoute);
+
+    fireEvent.click(await screen.findByRole("button", { name: /^recalculate$/i }));
+
+    expect(await screen.findByRole("heading", { name: "City Museum" })).toBeVisible();
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /fresh route could not be loaded/i
+    );
+  });
+
+  it("invalidates the full session while hidden and requires re-alignment on return", async () => {
+    const recovery = await setupRecoveryApp();
+
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      value: "hidden"
+    });
+    fireEvent(document, new Event("visibilitychange"));
+
+    expect(recovery.sessionStops[0]).toHaveBeenCalledOnce();
+    expect(
+      screen.queryByLabelText(/augmented reality navigation view/i)
+    ).not.toBeInTheDocument();
+
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      value: "visible"
+    });
+    fireEvent(document, new Event("visibilitychange"));
+
+    expect(
+      await screen.findByRole("heading", { name: /align route to the road/i })
+    ).toBeVisible();
+  });
+
+  it("invalidates active tracking when the physical screen orientation changes", async () => {
+    const orientation = new EventTarget();
+    Object.defineProperty(orientation, "angle", { value: 90 });
+    Object.defineProperty(globalThis.screen, "orientation", {
+      configurable: true,
+      value: orientation
+    });
+    const recovery = await setupRecoveryApp();
+
+    act(() => {
+      orientation.dispatchEvent(new Event("change"));
+    });
+
+    expect(recovery.sessionStops[0]).toHaveBeenCalledOnce();
+    expect(
+      await screen.findByRole("heading", { name: /align route to the road/i })
+    ).toBeVisible();
+  });
 });
 
 async function reachNavigation(): Promise<void> {
@@ -175,6 +280,11 @@ async function reachNavigation(): Promise<void> {
   fireEvent.click(await screen.findByRole("button", { name: /start ar walk/i }));
   fireEvent.click(screen.getByRole("button", { name: /enable camera and sensors/i }));
   await screen.findByRole("heading", { name: /align route to the road/i });
+  await completeCalibration();
+  await screen.findByLabelText(/augmented reality navigation view/i);
+}
+
+async function completeCalibration(): Promise<void> {
   fireEvent.click(screen.getByRole("button", { name: /chest.*1\.4 m/i }));
   fireEvent.click(screen.getByRole("button", { name: /capture standing pose/i }));
   const roadView = await screen.findByRole("button", { name: /road calibration view/i });
@@ -182,7 +292,74 @@ async function reachNavigation(): Promise<void> {
   fireEvent.pointerDown(roadView, { clientX: 100, clientY: 300 });
   fireEvent.click(await screen.findByRole("button", { name: /scan road features/i }));
   fireEvent.click(await screen.findByRole("button", { name: /lock route.*start ar/i }));
-  await screen.findByLabelText(/augmented reality navigation view/i);
+}
+
+async function setupRecoveryApp(
+  options: { failRecalculation?: boolean } = {}
+) {
+  const track = { stop: vi.fn(), enabled: true };
+  const stream = {
+    getTracks: () => [track],
+    getVideoTracks: () => [
+      { ...track, getSettings: () => ({ width: 1280, height: 720 }) }
+    ]
+  } as unknown as MediaStream;
+  const initialFix = {
+    point: { lat: 22.57, lng: 88.36 },
+    accuracyMeters: 5,
+    timestampMs: 1000
+  };
+  const freshFix = {
+    point: { lat: 22.57045, lng: 88.36 },
+    accuracyMeters: 5,
+    timestampMs: 5000
+  };
+  const requestLocation = vi
+    .fn()
+    .mockResolvedValueOnce(initialFix)
+    .mockResolvedValueOnce(freshFix);
+  const routePlan = (origin = initialFix.point) => ({
+    origin,
+    destination: { ...destination.location, name: destination.name },
+    encodedPolyline: encode([[origin.lat, origin.lng], [22.5709, 88.36]]),
+    distanceMeters: 100,
+    durationSeconds: 80,
+    steps: []
+  });
+  const requestRoute = vi.fn(async ({ origin }: { origin: typeof initialFix.point }) => {
+    if (requestRoute.mock.calls.length > 1 && options.failRecalculation) {
+      throw new Error("Fresh route could not be loaded.");
+    }
+    return routePlan(origin);
+  });
+  const sessionInputs: AppNavigationSessionInput[] = [];
+  const sessionStops: ReturnType<typeof vi.fn>[] = [];
+
+  render(
+    <App
+      destinationAdapter={destinationAdapter()}
+      mapAdapter={{ mount: () => () => undefined }}
+      requestLocation={requestLocation}
+      requestRoute={requestRoute}
+      requestAccess={vi.fn(async () => ({ stream, location: initialFix }))}
+      createCalibrationRuntime={() => calibrationRuntime()}
+      createSession={(input) => {
+        sessionInputs.push(input);
+        const stop = vi.fn();
+        sessionStops.push(stop);
+        return { start: async () => undefined, stop };
+      }}
+      backendFactory={() => new FakeRenderer()}
+    />
+  );
+  await reachNavigation();
+  return {
+    freshFix,
+    requestLocation,
+    requestRoute,
+    sessionInputs,
+    sessionStops
+  };
 }
 
 function destinationAdapter(): DestinationSearchAdapter {

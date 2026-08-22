@@ -37,6 +37,8 @@ Enable these services for the project:
 
 Restrict the browser key by the deployed HTTPS referrer and allow only Maps JavaScript and Places. Keep the Routes key server-side, restrict it to the Routes API, and add an IP or supported server restriction when the hosting platform makes one available. Never expose `GOOGLE_ROUTES_SERVER_KEY` through a `VITE_` variable.
 
+The route broker also applies a best-effort per-client limit of 20 requests per minute from trusted hosting IP headers. Its bounded in-memory state is local to each serverless instance, so it is not a distributed quota or abuse-prevention guarantee. Keep Google Cloud's hard daily Routes quota (500 requests for the initial MVP) as the distributed backstop, and review hosting logs without recording client IPs or coordinates.
+
 [Google Maps Platform requires billing and uses pay-as-you-go pricing](https://developers.google.com/maps/billing-and-pricing/billing-overview). Its per-SKU free usage caps may cover a small prototype, but the APIs should not be treated as unlimited or guaranteed free. Before field testing, set billing alerts and conservative daily request quotas—for example 500 Routes requests, 2,000 autocomplete requests, and 1,000 dynamic map loads—then adjust from observed use and the [current pricing categories](https://developers.google.com/maps/billing-and-pricing/pricing-categories).
 
 ## Commands

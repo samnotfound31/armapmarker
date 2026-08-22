@@ -3,6 +3,9 @@ import type { CV, Mat } from "@techstark/opencv-js";
 import { TrackingQualityGate } from "./quality";
 import {
   computeResidualHomography,
+  invertHomography,
+  multiplyHomographies,
+  normalizeHomography,
   limitVisualResidual
 } from "./residualHomography";
 import type { TrackerResult } from "./types";
@@ -14,6 +17,7 @@ export type CvAllocation = {
 export type PreparedCvFrame = {
   resources: readonly CvAllocation[];
   candidateCount: number;
+  trackingFromImage: Mat3;
   opaque: unknown;
 };
 
@@ -51,13 +55,32 @@ const OPENCV_CONFIG = {
 
 const IDENTITY_HOMOGRAPHY: Mat3 = [1, 0, 0, 0, 1, 0, 0, 0, 1];
 
+export type OpenCvTrackerConfig = {
+  keyframeReplacementIntervalFrames: number;
+};
+
+const DEFAULT_TRACKER_CONFIG: Readonly<OpenCvTrackerConfig> = {
+  keyframeReplacementIntervalFrames: 30
+};
+
 export class OpenCvTracker {
   private previousFrame: PreparedCvFrame | null = null;
   private readonly qualityGate = new TrackingQualityGate();
-  private keyframeId = 0;
+  private keyframeId = 1;
+  private framesSinceKeyframe = 0;
+  private keyframeBaseHomography: Mat3 = IDENTITY_HOMOGRAPHY;
+  private residualSinceKeyframe: Mat3 = IDENTITY_HOMOGRAPHY;
   private disposed = false;
 
-  constructor(private readonly adapter: OpenCvAdapter) {}
+  constructor(
+    private readonly adapter: OpenCvAdapter,
+    private readonly config: Readonly<OpenCvTrackerConfig> =
+      DEFAULT_TRACKER_CONFIG
+  ) {
+    if (config.keyframeReplacementIntervalFrames < 1) {
+      throw new RangeError("Keyframe replacement interval must be positive.");
+    }
+  }
 
   async process(
     frame: ImageBitmap | ImageData,
@@ -82,7 +105,13 @@ export class OpenCvTracker {
     let estimate: CvTrackEstimate | null = null;
     try {
       estimate = await this.adapter.track(previousFrame, currentFrame);
-      const observedHomography = estimate.homography ?? undefined;
+      const observedHomography = estimate.homography
+        ? toFullImageHomography(
+            estimate.homography,
+            previousFrame.trackingFromImage,
+            currentFrame.trackingFromImage
+          )
+        : undefined;
       const outcome = this.qualityGate.update({
         timestampMs,
         candidateCount: estimate.trackedFeatureCount,
@@ -91,11 +120,9 @@ export class OpenCvTracker {
         motionValid: estimate.motionValid && estimate.homography !== null,
         ...(observedHomography ? { observedHomography } : {})
       });
-      this.keyframeId += 1;
-      this.previousFrame = currentFrame;
-      deleteAllocations(previousFrame.resources);
-
-      if (!estimate.homography || !estimate.motionValid) {
+      if (!observedHomography || !estimate.motionValid) {
+        this.previousFrame = currentFrame;
+        deleteAllocations(previousFrame.resources);
         return {
           status: "lost",
           timestampMs,
@@ -105,14 +132,43 @@ export class OpenCvTracker {
         };
       }
 
-      const visualHomography = limitVisualResidual(
-        computeResidualHomography(estimate.homography, sensorHomography)
+      const frameVisualHomography = computeResidualHomography(
+        observedHomography,
+        sensorHomography
       );
+      this.residualSinceKeyframe = normalizeHomography(
+        multiplyHomographies(
+          frameVisualHomography,
+          this.residualSinceKeyframe
+        )
+      );
+      const accumulatedVisualHomography = limitVisualResidual(
+        normalizeHomography(
+          multiplyHomographies(
+            this.residualSinceKeyframe,
+            this.keyframeBaseHomography
+          )
+        )
+      );
+      if (outcome.quality.state === "locked") {
+        this.framesSinceKeyframe += 1;
+        if (
+          this.framesSinceKeyframe >=
+            this.config.keyframeReplacementIntervalFrames
+        ) {
+          this.keyframeBaseHomography = accumulatedVisualHomography;
+          this.residualSinceKeyframe = IDENTITY_HOMOGRAPHY;
+          this.keyframeId += 1;
+          this.framesSinceKeyframe = 0;
+        }
+      }
+      this.previousFrame = currentFrame;
+      deleteAllocations(previousFrame.resources);
       return {
         status: "tracked",
         timestampMs,
         keyframeId: this.keyframeId,
-        visualHomography,
+        visualHomography: accumulatedVisualHomography,
         quality: outcome.quality
       };
     } catch (error) {
@@ -185,6 +241,11 @@ class OpenCvJsAdapter implements OpenCvAdapter {
       return {
         resources: [grayRoadRoi, features],
         candidateCount: features.rows,
+        trackingFromImage: [
+          scale, 0, 0,
+          0, scale, 0,
+          0, -roiTop, 1
+        ],
         opaque: { grayRoadRoi, features } satisfies OpenCvFrameOpaque
       };
     } catch (error) {
@@ -295,6 +356,19 @@ class OpenCvJsAdapter implements OpenCvAdapter {
       throw error;
     }
   }
+}
+
+export function toFullImageHomography(
+  trackingHomography: Mat3,
+  previousTrackingFromImage: Mat3,
+  currentTrackingFromImage: Mat3
+): Mat3 {
+  return normalizeHomography(
+    multiplyHomographies(
+      invertHomography(currentTrackingFromImage),
+      multiplyHomographies(trackingHomography, previousTrackingFromImage)
+    )
+  );
 }
 
 async function loadOpenCv(): Promise<CV> {

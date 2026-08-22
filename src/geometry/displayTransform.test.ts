@@ -4,6 +4,13 @@ import {
   PORTRAIT_SCREEN
 } from "../test/geometryFixtures";
 import { createDisplayTransform } from "./displayTransform";
+import {
+  normalizeScreenOrientationAngle,
+  resolveDisplayRotation,
+  rotateCameraFromGroundForScreen
+} from "./displayTransform";
+import { applyMat4ToPoint } from "./groundCalibration";
+import { IDENTITY_MAT4 } from "../test/geometryFixtures";
 
 describe("createDisplayTransform", () => {
   it("maps the optical centre through a portrait quarter-turn", () => {
@@ -51,5 +58,34 @@ describe("createDisplayTransform", () => {
       xPx: 960,
       yPx: 540
     });
+  });
+
+  it("normalizes both positive and negative screen orientation angles", () => {
+    expect(normalizeScreenOrientationAngle(90)).toBe(90);
+    expect(normalizeScreenOrientationAngle(-90)).toBe(270);
+    expect(normalizeScreenOrientationAngle(450)).toBe(90);
+  });
+
+  it("applies the same screen quarter-turn to the sensor camera frame", () => {
+    const positive = rotateCameraFromGroundForScreen(IDENTITY_MAT4, 90);
+    const negative = rotateCameraFromGroundForScreen(IDENTITY_MAT4, -90);
+
+    expect(applyMat4ToPoint(positive, [1, 0, 2])).toEqual([
+      expect.closeTo(0),
+      expect.closeTo(1),
+      2
+    ]);
+    expect(applyMat4ToPoint(negative, [1, 0, 2])).toEqual([
+      expect.closeTo(0),
+      expect.closeTo(-1),
+      2
+    ]);
+  });
+
+  it("prefers actual +90/-90 orientation and falls back to dimension mismatch", () => {
+    expect(resolveDisplayRotation(90, 1280, 720, 844, 390)).toBe(90);
+    expect(resolveDisplayRotation(-90, 1280, 720, 844, 390)).toBe(270);
+    expect(resolveDisplayRotation(0, 1280, 720, 390, 844)).toBe(90);
+    expect(resolveDisplayRotation(0, 1280, 720, 844, 390)).toBe(0);
   });
 });

@@ -51,6 +51,7 @@ export class TrackerClient {
   private currentStatus: TrackerClientStatus = "idle";
   private resolveStart: (() => void) | null = null;
   private rejectStart: ((error: Error) => void) | null = null;
+  private fallbackAttempted = false;
 
   constructor(private readonly options: TrackerClientOptions) {
     this.workerFactory =
@@ -161,7 +162,7 @@ export class TrackerClient {
         worker.onmessage = (event) => this.handleWorkerMessage(event.data);
         worker.onerror = (event) => {
           const message = event.message || "Visual tracking worker failed.";
-          this.failWorkerInitialization(message);
+          this.handleWorkerUnavailable(message);
         };
         worker.postMessage({ type: "initialize" });
       } catch (error) {
@@ -181,7 +182,7 @@ export class TrackerClient {
       return;
     }
     if (message.type === "unavailable") {
-      this.failWorkerInitialization(message.message);
+      this.handleWorkerUnavailable(message.message);
       return;
     }
 
@@ -196,11 +197,53 @@ export class TrackerClient {
   }
 
   private failWorkerInitialization(message: string): void {
-    const error = new Error(message);
-    const reject = this.rejectStart;
-    this.clearStartCallbacks();
-    this.markUnavailable(message);
-    reject?.(error);
+    if (this.currentStatus !== "starting" || this.fallbackAttempted) return;
+    this.fallbackAttempted = true;
+    this.terminateFailedWorker();
+    void this.startMainThreadFallback(message);
+  }
+
+  private handleWorkerUnavailable(message: string): void {
+    if (this.currentStatus === "starting") {
+      this.failWorkerInitialization(message);
+      return;
+    }
+    if (this.currentStatus === "ready") {
+      this.terminateFailedWorker();
+      this.markUnavailable(message);
+    }
+  }
+
+  private async startMainThreadFallback(workerMessage: string): Promise<void> {
+    try {
+      const tracker = await this.options.mainThreadFactory();
+      if (this.currentStatus !== "starting") {
+        tracker.dispose();
+        return;
+      }
+      this.mainThreadTracker = tracker;
+      this.currentStatus = "ready";
+      this.resolveStart?.();
+      this.clearStartCallbacks();
+    } catch (error) {
+      if (this.currentStatus !== "starting") return;
+      const message = errorMessage(
+        error,
+        `${workerMessage}; main-thread OpenCV could not initialize.`
+      );
+      const reject = this.rejectStart;
+      this.clearStartCallbacks();
+      this.markUnavailable(message);
+      reject?.(new Error(message, { cause: error }));
+    }
+  }
+
+  private terminateFailedWorker(): void {
+    if (!this.worker) return;
+    this.worker.onmessage = null;
+    this.worker.onerror = null;
+    this.worker.terminate();
+    this.worker = null;
   }
 
   private markUnavailable(message: string): void {

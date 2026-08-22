@@ -48,7 +48,8 @@ describe("requestWalkingRoute", () => {
     expect(route.destination).toEqual({
       lat: 22.58,
       lng: 88.37,
-      name: "City Museum"
+      name: "City Museum",
+      placeId: "museum-place-id"
     });
     expect(fetchRoute).toHaveBeenCalledOnce();
     expect(fetchRoute.mock.calls[0]?.[1]).toMatchObject({

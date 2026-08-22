@@ -89,6 +89,114 @@ describe("NavigationSession", () => {
     expect(onUnavailable).toHaveBeenCalledWith("OpenCV failed to initialize");
     expect(fake.trackerDispose).toHaveBeenCalledOnce();
   });
+
+  it("keeps the calibration camera at the ground-frame origin on the first GPS fix", async () => {
+    const fake = createAdapters();
+    const onUpdate = vi.fn();
+    const route = routePlan();
+    route.origin = { lat: 0, lng: 0 };
+    route.destination = { lat: 0.001, lng: 0, name: "Museum" };
+    route.distanceMeters = 100;
+    const local: LocalRoutePoint[] = [
+      { eastMeters: 0, northMeters: 0, upMeters: 0, routeDistanceMeters: 0 },
+      { eastMeters: 0, northMeters: 100, upMeters: 0, routeDistanceMeters: 100 }
+    ];
+    const ground: RouteGroundPoint[] = [
+      { rightMeters: 0, upMeters: 0, forwardMeters: -50, routeDistanceMeters: 0 },
+      { rightMeters: 0, upMeters: 0, forwardMeters: 50, routeDistanceMeters: 100 }
+    ];
+    const lock = calibration();
+    lock.calibrationRouteDistanceMeters = 50;
+    lock.groundFromRoute = [
+      1, 0, 0, 0,
+      0, 1, 0, 0,
+      0, 0, 1, 0,
+      2, 0, 0, 1
+    ];
+    const session = new NavigationSession({
+      route,
+      enuOrigin: route.origin,
+      localRoute: local,
+      groundRoute: ground,
+      calibration: lock,
+      adapters: fake.adapters,
+      onUpdate,
+      onUnavailable: vi.fn(),
+      onArrived: vi.fn()
+    });
+    await session.start();
+
+    fake.emitLocation({
+      point: { lat: 0.0004491576, lng: 0 },
+      accuracyMeters: 5,
+      timestampMs: 1000
+    });
+
+    expect(onUpdate.mock.lastCall?.[0].pose.routeProgressMeters).toBeCloseTo(50, 1);
+    expect(onUpdate.mock.lastCall?.[0].pose.cameraPositionGroundMeters).toEqual([
+      expect.closeTo(0),
+      1.4,
+      expect.closeTo(0, 1)
+    ]);
+  });
+
+  it("reports the latest accepted fix and snapped progress for re-alignment", async () => {
+    const fake = createAdapters();
+    const onLocationAccepted = vi.fn();
+    const session = new NavigationSession({
+      route: routePlan(),
+      localRoute: localRoute(),
+      groundRoute: groundRoute(),
+      calibration: calibration(),
+      adapters: fake.adapters,
+      onUpdate: vi.fn(),
+      onLocationAccepted,
+      onUnavailable: vi.fn(),
+      onArrived: vi.fn()
+    });
+    await session.start();
+    const latest = fix(22.5705, 2000);
+
+    fake.emitLocation(latest);
+
+    expect(onLocationAccepted).toHaveBeenCalledWith(
+      latest,
+      expect.closeTo(55.65, 0)
+    );
+  });
+
+  it("feeds lost tracker quality into the rendered pose immediately", async () => {
+    const fake = createAdapters();
+    const onUpdate = vi.fn();
+    const session = new NavigationSession({
+      route: routePlan(),
+      localRoute: localRoute(),
+      groundRoute: groundRoute(),
+      calibration: calibration(),
+      adapters: fake.adapters,
+      onUpdate,
+      onUnavailable: vi.fn(),
+      onArrived: vi.fn()
+    });
+    await session.start();
+    fake.emitLocation(fix(22.5701, 1000));
+
+    fake.emitTracker({
+      status: "lost",
+      timestampMs: 1100,
+      keyframeId: 1,
+      visualHomography: null,
+      quality: {
+        state: "realign",
+        featureCount: 4,
+        inlierCount: 0,
+        inlierRatio: 0,
+        medianReprojectionErrorPx: Number.POSITIVE_INFINITY
+      }
+    });
+
+    expect(onUpdate.mock.lastCall?.[0].pose.quality.state).toBe("realign");
+  });
 });
 
 function createAdapters() {

@@ -1,4 +1,4 @@
-import type { Mat3 } from "../domain/types";
+import type { Mat3, Mat4 } from "../domain/types";
 import type { ImagePixel } from "./intrinsics";
 
 export type DisplayRotation = 0 | 90 | 180 | 270;
@@ -76,6 +76,55 @@ export function applyMat3ToPixel(matrix: Mat3, point: ImagePixel): ImagePixel {
   };
 }
 
+export function normalizeScreenOrientationAngle(angleDegrees: number): DisplayRotation {
+  if (!Number.isFinite(angleDegrees)) return 0;
+  const normalized = ((Math.round(angleDegrees / 90) * 90) % 360 + 360) % 360;
+  return normalized as DisplayRotation;
+}
+
+export function readScreenOrientationAngle(): DisplayRotation {
+  const screenAngle = globalThis.screen?.orientation?.angle;
+  const legacyAngle = (globalThis as typeof globalThis & { orientation?: number })
+    .orientation;
+  return normalizeScreenOrientationAngle(
+    typeof screenAngle === "number"
+      ? screenAngle
+      : typeof legacyAngle === "number"
+        ? legacyAngle
+        : 0
+  );
+}
+
+export function resolveDisplayRotation(
+  screenAngleDegrees: number,
+  imageWidthPx: number,
+  imageHeightPx: number,
+  screenWidthPx: number,
+  screenHeightPx: number
+): DisplayRotation {
+  const actualAngle = normalizeScreenOrientationAngle(screenAngleDegrees);
+  if (actualAngle !== 0) return actualAngle;
+  const imageIsPortrait = imageHeightPx > imageWidthPx;
+  const screenIsPortrait = screenHeightPx > screenWidthPx;
+  return imageIsPortrait === screenIsPortrait ? 0 : 90;
+}
+
+export function rotateCameraFromGroundForScreen(
+  cameraFromGround: Mat4,
+  angleDegrees: number
+): Mat4 {
+  const angle = (normalizeScreenOrientationAngle(angleDegrees) * Math.PI) / 180;
+  const cosine = Math.cos(angle);
+  const sine = Math.sin(angle);
+  const screenFromCamera: Mat4 = [
+    cosine, sine, 0, 0,
+    -sine, cosine, 0, 0,
+    0, 0, 1, 0,
+    0, 0, 0, 1
+  ];
+  return multiplyMat4(screenFromCamera, cameraFromGround);
+}
+
 function rotationMatrix(
   rotationDeg: DisplayRotation,
   width: number,
@@ -104,6 +153,20 @@ function multiplyMat3(left: Mat3, right: Mat3): Mat3 {
     }
   }
   return output as unknown as Mat3;
+}
+
+function multiplyMat4(left: Mat4, right: Mat4): Mat4 {
+  const output = Array.from({ length: 16 }, () => 0);
+  for (let column = 0; column < 4; column += 1) {
+    for (let row = 0; row < 4; row += 1) {
+      output[column * 4 + row] =
+        left[row]! * right[column * 4]! +
+        left[4 + row]! * right[column * 4 + 1]! +
+        left[8 + row]! * right[column * 4 + 2]! +
+        left[12 + row]! * right[column * 4 + 3]!;
+    }
+  }
+  return output as unknown as Mat4;
 }
 
 function invertAffineMat3(matrix: Mat3): Mat3 {

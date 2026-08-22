@@ -10,7 +10,8 @@ import {
 } from "../ar/RouteRenderer";
 import {
   createDisplayTransform,
-  type DisplayRotation
+  readScreenOrientationAngle,
+  resolveDisplayRotation
 } from "../geometry/displayTransform";
 
 export type ArViewportProps = {
@@ -69,7 +70,8 @@ export function ArViewport({
       lastHeight = heightPx;
       const imageWidthPx = video.videoWidth || calibration.intrinsics.imageWidthPx;
       const imageHeightPx = video.videoHeight || calibration.intrinsics.imageHeightPx;
-      const rotationDeg = inferDisplayRotation(
+      const rotationDeg = resolveDisplayRotation(
+        readScreenOrientationAngle(),
         imageWidthPx,
         imageHeightPx,
         widthPx,
@@ -150,17 +152,6 @@ export function ArViewport({
       ) : null}
     </section>
   );
-}
-
-function inferDisplayRotation(
-  imageWidthPx: number,
-  imageHeightPx: number,
-  screenWidthPx: number,
-  screenHeightPx: number
-): DisplayRotation {
-  const imageIsPortrait = imageHeightPx > imageWidthPx;
-  const screenIsPortrait = screenHeightPx > screenWidthPx;
-  return imageIsPortrait === screenIsPortrait ? 0 : 90;
 }
 
 function errorMessage(error: unknown): string {
