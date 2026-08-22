@@ -165,6 +165,36 @@ describe("NavigationSession", () => {
     );
   });
 
+  it("does not report repeated or stale GPS fixes as accepted", async () => {
+    const fake = createAdapters();
+    const onUpdate = vi.fn();
+    const onLocationAccepted = vi.fn();
+    const session = new NavigationSession({
+      route: routePlan(),
+      localRoute: localRoute(),
+      groundRoute: groundRoute(),
+      calibration: calibration(),
+      adapters: fake.adapters,
+      onUpdate,
+      onLocationAccepted,
+      onUnavailable: vi.fn(),
+      onArrived: vi.fn()
+    });
+    await session.start();
+    const accepted = fix(22.5702, 2000);
+
+    fake.emitLocation(accepted);
+    fake.emitLocation(fix(22.5709, 2000));
+    fake.emitLocation(fix(22.5708, 1500));
+
+    expect(onLocationAccepted).toHaveBeenCalledOnce();
+    expect(onLocationAccepted).toHaveBeenCalledWith(
+      accepted,
+      expect.closeTo(22.26, 0)
+    );
+    expect(onUpdate).toHaveBeenCalledOnce();
+  });
+
   it("feeds lost tracker quality into the rendered pose immediately", async () => {
     const fake = createAdapters();
     const onUpdate = vi.fn();

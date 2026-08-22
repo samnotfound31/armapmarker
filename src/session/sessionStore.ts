@@ -1,7 +1,10 @@
 import type { RoutePlan } from "../domain/types";
 
-const STORAGE_KEY = "ar-walking-navigation:active";
-const STORAGE_VERSION = 1;
+const SESSION_STORAGE_KEY = "ar-walking-navigation:active";
+const PROGRESS_STORAGE_KEY = "ar-walking-navigation:progress";
+const SESSION_STORAGE_VERSION = 2;
+const LEGACY_SESSION_STORAGE_VERSION = 1;
+const PROGRESS_STORAGE_VERSION = 1;
 
 export type PersistedNavigationStage = "preview" | "calibration" | "navigating";
 
@@ -13,41 +16,70 @@ export type PersistedSession = {
 
 export type SessionStore = {
   load(): PersistedSession | null;
-  save(session: PersistedSession): void;
+  saveSession(session: PersistedSession): void;
+  saveProgress(displayedProgressMeters: number): void;
   clear(): void;
 };
 
 export function createSessionStore(storage: Storage = sessionStorage): SessionStore {
   return {
     load() {
-      const serialized = storage.getItem(STORAGE_KEY);
+      const serialized = storage.getItem(SESSION_STORAGE_KEY);
       if (!serialized) return null;
       try {
         const value: unknown = JSON.parse(serialized);
-        return parsePersistedSession(value);
+        const session = parsePersistedSession(value);
+        if (!session) return null;
+        const progress = parsePersistedProgress(
+          storage.getItem(PROGRESS_STORAGE_KEY)
+        );
+        return {
+          ...session,
+          displayedProgressMeters:
+            progress ?? session.displayedProgressMeters
+        };
       } catch {
         return null;
       }
     },
-    save(session) {
+    saveSession(session) {
+      storage.removeItem(PROGRESS_STORAGE_KEY);
       storage.setItem(
-        STORAGE_KEY,
+        SESSION_STORAGE_KEY,
         JSON.stringify({
-          version: STORAGE_VERSION,
+          version: SESSION_STORAGE_VERSION,
           route: session.route,
           stage: session.stage,
-          displayedProgressMeters: Math.max(0, session.displayedProgressMeters)
+          displayedProgressMeters: normalizeProgress(
+            session.displayedProgressMeters
+          )
+        })
+      );
+    },
+    saveProgress(displayedProgressMeters) {
+      storage.setItem(
+        PROGRESS_STORAGE_KEY,
+        JSON.stringify({
+          version: PROGRESS_STORAGE_VERSION,
+          displayedProgressMeters: normalizeProgress(displayedProgressMeters)
         })
       );
     },
     clear() {
-      storage.removeItem(STORAGE_KEY);
+      storage.removeItem(SESSION_STORAGE_KEY);
+      storage.removeItem(PROGRESS_STORAGE_KEY);
     }
   };
 }
 
 function parsePersistedSession(value: unknown): PersistedSession | null {
-  if (!isRecord(value) || value.version !== STORAGE_VERSION) return null;
+  if (
+    !isRecord(value) ||
+    (value.version !== SESSION_STORAGE_VERSION &&
+      value.version !== LEGACY_SESSION_STORAGE_VERSION)
+  ) {
+    return null;
+  }
   if (!isRoutePlan(value.route)) return null;
   if (
     value.stage !== "preview" &&
@@ -68,6 +100,27 @@ function parsePersistedSession(value: unknown): PersistedSession | null {
     stage: value.stage,
     displayedProgressMeters: value.displayedProgressMeters
   };
+}
+
+function parsePersistedProgress(serialized: string | null): number | null {
+  if (!serialized) return null;
+  try {
+    const value: unknown = JSON.parse(serialized);
+    if (
+      !isRecord(value) ||
+      value.version !== PROGRESS_STORAGE_VERSION ||
+      !isFiniteNonNegative(value.displayedProgressMeters)
+    ) {
+      return null;
+    }
+    return value.displayedProgressMeters;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeProgress(value: number): number {
+  return Number.isFinite(value) ? Math.max(0, value) : 0;
 }
 
 function isRoutePlan(value: unknown): value is RoutePlan {

@@ -175,7 +175,11 @@ export function App({
           if (controller.signal.aborted) return;
           setRoute(nextRoute);
           setStage("preview");
-          store.save({ route: nextRoute, stage: "preview", displayedProgressMeters: 0 });
+          store.saveSession({
+            route: nextRoute,
+            stage: "preview",
+            displayedProgressMeters: 0
+          });
         })
         .catch((error: unknown) => {
           if (controller.signal.aborted) return;
@@ -244,7 +248,11 @@ export function App({
     if (message) setCompatibilityMessage(message);
     if (route) {
       setStage("preview");
-      store.save({ route, stage: "preview", displayedProgressMeters: 0 });
+      store.saveSession({
+        route,
+        stage: "preview",
+        displayedProgressMeters: 0
+      });
     } else {
       setStage("search");
     }
@@ -278,7 +286,7 @@ export function App({
       setPreparedRoute(nextPreparedRoute);
       setCalibrationRuntime(runtime);
       setStage("calibration");
-      store.save({
+      store.saveSession({
         route,
         stage: "calibration",
         displayedProgressMeters: nextPreparedRoute.calibrationProgressMeters
@@ -320,11 +328,7 @@ export function App({
         latestAcceptedFix.current = fix;
         originFixRef.current = fix;
         latestAcceptedProgressMeters.current = progressMeters;
-        store.save({
-          route,
-          stage: "navigating",
-          displayedProgressMeters: progressMeters
-        });
+        store.saveProgress(progressMeters);
       },
       onUnavailable: handleUnavailable,
       onArrived: (snapshot) => {
@@ -336,7 +340,7 @@ export function App({
       }
     });
     activeSession.current = session;
-    store.save({
+    store.saveSession({
       route,
       stage: "navigating",
       displayedProgressMeters: lockedCalibration.calibrationRouteDistanceMeters
@@ -365,7 +369,7 @@ export function App({
       setPreparedRoute(nextPreparedRoute);
       setCalibrationRuntime(runtime);
       setStage("calibration");
-      store.save({
+      store.saveSession({
         route,
         stage: "calibration",
         displayedProgressMeters: nextPreparedRoute.calibrationProgressMeters
@@ -426,7 +430,7 @@ export function App({
         setRoute(nextRoute);
         setPreparedRoute(undefined);
         setCompatibilityMessage(undefined);
-        store.save({
+        store.saveSession({
           route: nextRoute,
           stage: "preview",
           displayedProgressMeters: 0
@@ -462,7 +466,7 @@ export function App({
         setMediaStreamEnabled(activeArGrant.current.stream, false);
       }
       if (currentRoute) {
-        store.save({
+        store.saveSession({
           route: currentRoute,
           stage: "calibration",
           displayedProgressMeters: latestAcceptedProgressMeters.current
@@ -717,7 +721,8 @@ function safeSessionStore(): SessionStore {
   } catch {
     return {
       load: () => null,
-      save: () => undefined,
+      saveSession: () => undefined,
+      saveProgress: () => undefined,
       clear: () => undefined
     };
   }

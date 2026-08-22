@@ -38,6 +38,11 @@ export type NavigationSnapshot = {
   timestampMs: number;
 };
 
+export type NavigationEngineUpdate = {
+  accepted: boolean;
+  snapshot: NavigationSnapshot;
+};
+
 const OFF_ROUTE_CORRIDOR_METERS = 20;
 const MAXIMUM_DECISION_ACCURACY_METERS = 15;
 const OFF_ROUTE_ENTRY_FIXES = 3;
@@ -68,10 +73,10 @@ export class NavigationEngine {
     this.progressFilter = new MonotonicProgressFilter(initialProgressMeters, 5);
   }
 
-  update(input: NavigationEngineInput): NavigationSnapshot {
+  update(input: NavigationEngineInput): NavigationEngineUpdate {
     if (this.lastTimestampMs !== null && input.timestampMs <= this.lastTimestampMs) {
       if (!this.snapshotValue) throw new Error("Navigation snapshot is unavailable.");
-      return this.snapshotValue;
+      return { accepted: false, snapshot: this.snapshotValue };
     }
 
     const match = nearestRouteProgress(input.position, this.route);
@@ -104,7 +109,7 @@ export class NavigationEngine {
       realignRequired: this.disagreementFrames >= REALIGN_DISAGREEMENT_FRAMES,
       timestampMs: input.timestampMs
     };
-    return this.snapshotValue;
+    return { accepted: true, snapshot: this.snapshotValue };
   }
 
   private updateOffRoute(crossTrackMeters: number, accuracyMeters: number): void {

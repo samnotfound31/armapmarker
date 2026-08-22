@@ -244,9 +244,11 @@ class OpenCvJsAdapter implements OpenCvAdapter {
         Math.max(0, Math.floor(height * OPENCV_CONFIG.roadRoiTopRatio))
       );
       const roiHeader = resized.roi(new this.cv.Rect(0, roiTop, width, height - roiTop));
+      allocations.push(roiHeader);
       const grayRoadRoi = roiHeader.clone();
+      allocations.push(grayRoadRoi);
       const features = detectGoodFeatures(this.cv, grayRoadRoi);
-      allocations.push(roiHeader, grayRoadRoi, features);
+      allocations.push(features);
 
       deleteAllocations([rgba, grayscale, resized, roiHeader]);
       return {

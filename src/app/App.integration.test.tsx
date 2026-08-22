@@ -2,12 +2,22 @@ import { encode } from "@googlemaps/polyline-codec";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Destination, PoseEstimate } from "../domain/types";
+import type { LocationFix } from "../device/location";
 import type { NavigationSnapshot } from "../navigation/navigationEngine";
 import type { DestinationSearchAdapter } from "../components/SearchScreen";
 import { buildApproximateIntrinsics } from "../geometry/intrinsics";
 import { FakeRenderer } from "../test/fakes/FakeRenderer";
 import { IDENTITY_MAT3, IDENTITY_MAT4 } from "../test/geometryFixtures";
-import type { SessionStore } from "../session/sessionStore";
+import {
+  NavigationSession,
+  type NavigationSessionAdapters,
+  type SensorPoseUpdate
+} from "../session/NavigationSession";
+import {
+  createSessionStore,
+  type SessionStore
+} from "../session/sessionStore";
+import type { TrackerResult } from "../tracking/types";
 import {
   App,
   type AppNavigationSessionInput,
@@ -238,33 +248,64 @@ describe("App integrated AR walk", () => {
     });
   });
 
-  it("persists progress only for accepted GPS fixes, not sensor or tracker pose updates", async () => {
-    const save = vi.fn<SessionStore["save"]>();
-    const store: SessionStore = {
-      load: () => null,
-      save,
-      clear: vi.fn()
-    };
-    const recovery = await setupRecoveryApp({ sessionStore: store });
-    const writesAfterStageChange = save.mock.calls.length;
+  it("persists only genuinely accepted GPS progress through the real session boundary", async () => {
+    const persisted = recordingStorage();
+    const navigation = navigationAdapterHarness();
+    const recovery = await setupRecoveryApp({
+      sessionStore: createSessionStore(persisted.storage),
+      navigationAdapters: navigation.adapters
+    });
+    await waitFor(() => expect(navigation.hasSubscribers()).toBe(true));
 
     act(() => {
-      for (let index = 0; index < 40; index += 1) {
-        recovery.sessionInputs[0]?.onUpdate(
-          runtimeSnapshot(18 + index * 0.01, 82 - index * 0.01, false)
-        );
+      navigation.emitLocation({
+        point: { lat: 22.57, lng: 88.36 },
+        accuracyMeters: 5,
+        timestampMs: 2000
+      });
+    });
+    persisted.writes.length = 0;
+
+    act(() => {
+      for (let index = 0; index < 20; index += 1) {
+        navigation.emitSensor({
+          timestampMs: 2100 + index * 2,
+          cameraFromGround: IDENTITY_MAT4,
+          orientationQuaternion: [0, 0, 0, 1]
+        });
+        navigation.emitTracker(trackedResult(2101 + index * 2));
       }
     });
+    expect(persisted.writes).toEqual([]);
 
-    expect(save).toHaveBeenCalledTimes(writesAfterStageChange);
+    act(() => navigation.emitLocation(recovery.freshFix));
+    expect(persisted.writes).toHaveLength(1);
+    expect(persisted.writes[0]?.key).toBe("ar-walking-navigation:progress");
+    expect(persisted.writes[0]?.value).not.toMatch(/encoded|route|museum/i);
+
     act(() => {
-      recovery.sessionInputs[0]?.onLocationAccepted?.(recovery.freshFix, 42);
+      navigation.emitLocation({
+        point: { lat: 22.57085, lng: 88.36 },
+        accuracyMeters: 5,
+        timestampMs: recovery.freshFix.timestampMs
+      });
+      navigation.emitLocation({
+        point: { lat: 22.5708, lng: 88.36 },
+        accuracyMeters: 5,
+        timestampMs: 4000
+      });
     });
-    expect(save).toHaveBeenCalledTimes(writesAfterStageChange + 1);
-    expect(save.mock.lastCall?.[0]).toMatchObject({
-      stage: "navigating",
-      displayedProgressMeters: 42
-    });
+    expect(persisted.writes).toHaveLength(1);
+    act(() => navigation.emitTracker(realignResult(5100)));
+    expect(persisted.writes).toHaveLength(1);
+
+    fireEvent.click(await screen.findByRole("button", { name: /^re-align$/i }));
+    await completeCalibration();
+
+    expect(recovery.sessionInputs).toHaveLength(2);
+    expect(
+      recovery.sessionInputs[1]?.calibration.calibrationRouteDistanceMeters
+    ).toBeCloseTo(50, 0);
   });
 
   it("recomputes a nonzero calibration match from the latest accepted fix on re-alignment", async () => {
@@ -464,6 +505,7 @@ async function setupRecoveryApp(
   options: {
     failRecalculation?: boolean;
     failRenderer?: boolean;
+    navigationAdapters?: NavigationSessionAdapters;
     sessionStore?: SessionStore;
     startAt?: "calibration" | "navigating";
   } = {}
@@ -525,6 +567,22 @@ async function setupRecoveryApp(
       createCalibrationRuntime={createCalibrationRuntime}
       createSession={(input) => {
         sessionInputs.push(input);
+        if (options.navigationAdapters) {
+          return new NavigationSession({
+            route: input.route,
+            ...(input.enuOrigin ? { enuOrigin: input.enuOrigin } : {}),
+            localRoute: input.localRoute,
+            groundRoute: input.groundRoute,
+            calibration: input.calibration,
+            adapters: options.navigationAdapters,
+            onUpdate: input.onUpdate,
+            ...(input.onLocationAccepted
+              ? { onLocationAccepted: input.onLocationAccepted }
+              : {}),
+            onUnavailable: input.onUnavailable,
+            onArrived: input.onArrived
+          });
+        }
         const stop = vi.fn();
         sessionStops.push(stop);
         return { start: async () => undefined, stop };
@@ -547,6 +605,107 @@ async function setupRecoveryApp(
     calibrationRuntimes,
     sessionInputs,
     sessionStops
+  };
+}
+
+function navigationAdapterHarness() {
+  let locationListener: ((fix: LocationFix) => void) | undefined;
+  let sensorListener: ((update: SensorPoseUpdate) => void) | undefined;
+  let trackerListener: ((result: TrackerResult) => void) | undefined;
+  const adapters: NavigationSessionAdapters = {
+    location: {
+      subscribe(listener) {
+        locationListener = listener;
+        return () => {
+          if (locationListener === listener) locationListener = undefined;
+        };
+      }
+    },
+    sensor: {
+      subscribe(listener) {
+        sensorListener = listener;
+        return () => {
+          if (sensorListener === listener) sensorListener = undefined;
+        };
+      }
+    },
+    frames: {
+      subscribe() {
+        return () => undefined;
+      }
+    },
+    tracker: {
+      async start(callbacks) {
+        trackerListener = callbacks.onResult;
+      },
+      submitFrame: () => true,
+      dispose() {
+        trackerListener = undefined;
+      }
+    }
+  };
+  return {
+    adapters,
+    hasSubscribers: () => Boolean(locationListener && sensorListener && trackerListener),
+    emitLocation: (fix: LocationFix) => locationListener?.(fix),
+    emitSensor: (update: SensorPoseUpdate) => sensorListener?.(update),
+    emitTracker: (result: TrackerResult) => trackerListener?.(result)
+  };
+}
+
+function trackedResult(timestampMs: number): TrackerResult {
+  return {
+    status: "tracked",
+    timestampMs,
+    keyframeId: 1,
+    visualHomography: IDENTITY_MAT3,
+    quality: {
+      state: "locked",
+      featureCount: 40,
+      inlierCount: 30,
+      inlierRatio: 0.75,
+      medianReprojectionErrorPx: 1
+    }
+  };
+}
+
+function realignResult(timestampMs: number): TrackerResult {
+  return {
+    status: "lost",
+    timestampMs,
+    keyframeId: 1,
+    visualHomography: null,
+    quality: {
+      state: "realign",
+      featureCount: 4,
+      inlierCount: 0,
+      inlierRatio: 0,
+      medianReprojectionErrorPx: Number.POSITIVE_INFINITY
+    }
+  };
+}
+
+function recordingStorage(): {
+  storage: Storage;
+  writes: Array<{ key: string; value: string }>;
+} {
+  const values = new Map<string, string>();
+  const writes: Array<{ key: string; value: string }> = [];
+  return {
+    writes,
+    storage: {
+      get length() {
+        return values.size;
+      },
+      clear: () => values.clear(),
+      getItem: (key) => values.get(key) ?? null,
+      key: (index) => [...values.keys()][index] ?? null,
+      removeItem: (key) => values.delete(key),
+      setItem(key, value) {
+        writes.push({ key, value });
+        values.set(key, value);
+      }
+    }
   };
 }
 

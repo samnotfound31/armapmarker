@@ -23,7 +23,7 @@ describe("NavigationEngine", () => {
   it("smooths snapped GPS progress with the 1.5-second response", () => {
     const engine = new NavigationEngine(ROUTE, STEPS, 100);
     engine.update(input(0, 0, 0));
-    const snapshot = engine.update(input(10, 0, 1500));
+    const snapshot = engine.update(input(10, 0, 1500)).snapshot;
 
     expect(snapshot.routeProgressMeters).toBeGreaterThan(4);
     expect(snapshot.routeProgressMeters).toBeLessThan(8);
@@ -35,7 +35,7 @@ describe("NavigationEngine", () => {
   it("starts smoothing and monotonic filtering at a nonzero re-alignment match", () => {
     const engine = new NavigationEngine(ROUTE, STEPS, 100, 60);
 
-    const snapshot = engine.update(input(61, 0, 1000));
+    const snapshot = engine.update(input(61, 0, 1000)).snapshot;
 
     expect(snapshot.routeProgressMeters).toBe(60);
     expect(snapshot.acceptedGpsProgressMeters).toBe(61);
@@ -45,22 +45,22 @@ describe("NavigationEngine", () => {
   it("ignores small backward GPS jitter but accepts genuine backtracking", () => {
     const engine = new NavigationEngine(ROUTE, STEPS, 100);
     engine.update(input(30, 0, 0));
-    const forward = engine.update(input(40, 0, 1500));
-    const jitter = engine.update(input(38, 0, 3000));
+    const forward = engine.update(input(40, 0, 1500)).snapshot;
+    const jitter = engine.update(input(38, 0, 3000)).snapshot;
     expect(jitter.acceptedGpsProgressMeters).toBe(40);
     expect(jitter.routeProgressMeters).toBeGreaterThanOrEqual(forward.routeProgressMeters);
 
-    const backtrack = engine.update(input(25, 0, 4500));
+    const backtrack = engine.update(input(25, 0, 4500)).snapshot;
     expect(backtrack.acceptedGpsProgressMeters).toBe(25);
   });
 
   it("enters off-route after three accurate fixes and recovers after two", () => {
     const engine = new NavigationEngine(ROUTE, STEPS, 100);
-    expect(engine.update(input(10, 25, 0)).offRoute).toBe(false);
-    expect(engine.update(input(11, 25, 1000)).offRoute).toBe(false);
-    expect(engine.update(input(12, 25, 2000)).offRoute).toBe(true);
-    expect(engine.update(input(13, 5, 3000)).offRoute).toBe(true);
-    expect(engine.update(input(14, 5, 4000)).offRoute).toBe(false);
+    expect(engine.update(input(10, 25, 0)).snapshot.offRoute).toBe(false);
+    expect(engine.update(input(11, 25, 1000)).snapshot.offRoute).toBe(false);
+    expect(engine.update(input(12, 25, 2000)).snapshot.offRoute).toBe(true);
+    expect(engine.update(input(13, 5, 3000)).snapshot.offRoute).toBe(true);
+    expect(engine.update(input(14, 5, 4000)).snapshot.offRoute).toBe(false);
   });
 
   it("selects the next maneuver and detects arrival inside the configured radius", () => {
@@ -74,16 +74,27 @@ describe("NavigationEngine", () => {
     });
 
     const engine = new NavigationEngine(ROUTE, STEPS, 100);
-    const arrived = engine.update(input(96, 0, 1000, 10));
+    const arrived = engine.update(input(96, 0, 1000, 10)).snapshot;
     expect(arrived.arrived).toBe(true);
   });
 
   it("requires persistent calibration disagreement before realignment", () => {
     const engine = new NavigationEngine(ROUTE, STEPS, 100);
     for (let index = 0; index < 9; index += 1) {
-      expect(engine.update(input(10, 0, index * 100, 90, true)).realignRequired).toBe(false);
+      expect(engine.update(input(10, 0, index * 100, 90, true)).snapshot.realignRequired).toBe(false);
     }
-    expect(engine.update(input(10, 0, 900, 90, true)).realignRequired).toBe(true);
+    expect(engine.update(input(10, 0, 900, 90, true)).snapshot.realignRequired).toBe(true);
+  });
+
+  it("returns an explicit rejection outcome for repeated and stale timestamps", () => {
+    const engine = new NavigationEngine(ROUTE, STEPS, 100);
+    const accepted = engine.update(input(20, 0, 2000));
+    const repeated = engine.update(input(80, 0, 2000));
+    const stale = engine.update(input(90, 0, 1500));
+
+    expect(accepted).toMatchObject({ accepted: true });
+    expect(repeated).toEqual({ accepted: false, snapshot: accepted.snapshot });
+    expect(stale).toEqual({ accepted: false, snapshot: accepted.snapshot });
   });
 });
 

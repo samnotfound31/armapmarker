@@ -1,16 +1,54 @@
-import { describe, expect, it, vi, type Mock } from "vitest";
+import { afterEach, describe, expect, it, vi, type Mock } from "vitest";
 import type { Mat3 } from "../domain/types";
 import { applyMat3ToPixel } from "../geometry/displayTransform";
 import {
+  loadOpenCvTracker,
   OpenCvTracker,
   toFullImageHomography,
   type CvAllocation,
   type OpenCvAdapter
 } from "./OpenCvTracker";
 
+const fakeOpenCvRuntime = vi.hoisted(() => ({
+  cv: {} as Record<string, unknown>
+}));
+
+vi.mock("./openCvRuntime", () => ({ default: fakeOpenCvRuntime.cv }));
+
+afterEach(() => vi.unstubAllGlobals());
+
 const SENSOR_IDENTITY: Mat3 = [1, 0, 0, 0, 1, 0, 0, 0, 1];
 
 describe("OpenCvTracker", () => {
+  it("deletes ROI Mats when feature detection throws", async () => {
+    vi.stubGlobal(
+      "ImageData",
+      class {
+        readonly data: Uint8ClampedArray;
+
+        constructor(
+          readonly width: number,
+          readonly height: number
+        ) {
+          this.data = new Uint8ClampedArray(width * height * 4);
+        }
+      }
+    );
+    const fake = throwingDetectionRuntime();
+    Object.assign(fakeOpenCvRuntime.cv, fake.cv);
+    const tracker = await loadOpenCvTracker();
+
+    await expect(
+      tracker.process(new ImageData(16, 16), 1000, SENSOR_IDENTITY)
+    ).rejects.toThrow("synthetic feature detection failure");
+
+    expect(fake.allocation("roi-header").delete).toHaveBeenCalledOnce();
+    expect(fake.allocation("gray-road-roi").delete).toHaveBeenCalledOnce();
+    expect(
+      fake.allocations.every((allocation) => allocation.delete.mock.calls.length === 1)
+    ).toBe(true);
+  });
+
   it("disposes superseded frame and estimate Mats after successful tracking", async () => {
     const fake = createFakeAdapter();
     const tracker = new OpenCvTracker(fake.adapter);
@@ -282,4 +320,98 @@ type TestAllocation = CvAllocation & { delete: Mock<() => void> };
 
 function allocation(): TestAllocation {
   return { delete: vi.fn<() => void>() };
+}
+
+function throwingDetectionRuntime() {
+  type FakeRuntimeMat = {
+    label: string;
+    rows: number;
+    cols: number;
+    delete: Mock<() => void>;
+    roi(rect: { width: number; height: number }): FakeRuntimeMat;
+    clone(): FakeRuntimeMat;
+  };
+  const allocations: FakeRuntimeMat[] = [];
+  class FakeMat implements FakeRuntimeMat {
+    label = "unassigned";
+    rows = 0;
+    cols = 0;
+    delete = vi.fn<() => void>();
+
+    constructor() {
+      allocations.push(this);
+    }
+
+    roi(rect: { width: number; height: number }): FakeRuntimeMat {
+      const result = new FakeMat();
+      result.label = "roi-header";
+      result.rows = rect.height;
+      result.cols = rect.width;
+      return result;
+    }
+
+    clone(): FakeRuntimeMat {
+      const result = new FakeMat();
+      result.label = "gray-road-roi";
+      result.rows = this.rows;
+      result.cols = this.cols;
+      return result;
+    }
+  }
+  const cv = {
+    Mat: FakeMat,
+    Size: class {
+      constructor(
+        readonly width: number,
+        readonly height: number
+      ) {}
+    },
+    Rect: class {
+      constructor(
+        readonly x: number,
+        readonly y: number,
+        readonly width: number,
+        readonly height: number
+      ) {}
+    },
+    COLOR_RGBA2GRAY: 1,
+    INTER_AREA: 2,
+    matFromImageData(image: ImageData) {
+      const result = new FakeMat();
+      result.label = "rgba";
+      result.rows = image.height;
+      result.cols = image.width;
+      return result;
+    },
+    cvtColor(source: FakeRuntimeMat, destination: FakeRuntimeMat) {
+      destination.label = "grayscale";
+      destination.rows = source.rows;
+      destination.cols = source.cols;
+    },
+    resize(
+      _source: FakeRuntimeMat,
+      destination: FakeRuntimeMat,
+      size: { width: number; height: number }
+    ) {
+      destination.label = "resized";
+      destination.rows = size.height;
+      destination.cols = size.width;
+    },
+    goodFeaturesToTrack(
+      _image: FakeRuntimeMat,
+      features: FakeRuntimeMat
+    ) {
+      features.label = "features";
+      throw new Error("synthetic feature detection failure");
+    }
+  };
+  return {
+    cv,
+    allocations,
+    allocation(label: string) {
+      const result = allocations.find((candidate) => candidate.label === label);
+      if (!result) throw new Error(`Missing ${label} allocation.`);
+      return result;
+    }
+  };
 }

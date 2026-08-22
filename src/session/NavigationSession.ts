@@ -142,7 +142,7 @@ export class NavigationSession {
       this.options.enuOrigin ?? this.options.route.origin
     );
     const destinationOffset = toEnu(this.options.route.destination, fix.point);
-    const navigation = this.engine.update({
+    const navigationUpdate = this.engine.update({
       position: localPosition,
       gpsAccuracyMeters: fix.accuracyMeters,
       distanceToDestinationMeters: Math.hypot(
@@ -153,6 +153,8 @@ export class NavigationSession {
       trackingQuality: this.latestQuality,
       calibrationDisagreement: this.latestQuality.state === "realign"
     });
+    if (!navigationUpdate.accepted) return;
+    const navigation = navigationUpdate.snapshot;
     this.latestNavigation = navigation;
     this.options.onLocationAccepted?.(
       fix,
