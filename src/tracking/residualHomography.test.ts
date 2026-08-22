@@ -57,19 +57,83 @@ describe("residual homography", () => {
     ).toThrow(/finite/i);
   });
 
-  it("caps image correction while preserving unit metric scale", () => {
-    const raw: Mat3 = [1.29, 0.55, 0.002, -0.55, 1.29, -0.001, 200, -150, 1];
-    const limited = limitVisualResidual(raw, {
-      maxRotationRad: 0.1,
-      maxTranslationPx: 40
+  it("preserves a valid bounded projective correction at near and far image points", () => {
+    const projective: Mat3 = [
+      1.02, 0.01, 0.0001,
+      0.02, 0.98, -0.00005,
+      12, -8, 1
+    ];
+    const limited = limitVisualResidual(projective, {
+      imageWidthPx: 1280,
+      imageHeightPx: 720,
+      maxPointDisplacementPx: 120,
+      maxConditionNumber: 20
     });
 
-    expect(Math.hypot(limited[0], limited[1])).toBeCloseTo(1);
-    expect(Math.atan2(limited[1], limited[0])).toBeCloseTo(0.1);
-    expect(Math.hypot(limited[6], limited[7])).toBeCloseTo(40);
-    expect(limited[2]).toBe(0);
-    expect(limited[5]).toBe(0);
-    expect(limited[8]).toBe(1);
+    expect(limited).toEqual(projective.map((value) => expect.closeTo(value)));
+    expect(applyMat3ToPixel(limited, { xPx: 160, yPx: 120 })).toEqual({
+      xPx: expect.closeTo(175.841584, 5),
+      yPx: expect.closeTo(110.09901, 5)
+    });
+    expect(applyMat3ToPixel(limited, { xPx: 1120, yPx: 600 })).toEqual({
+      xPx: expect.closeTo(1078.003697, 5),
+      yPx: expect.closeTo(546.395564, 5)
+    });
+    expect(limited[2]).not.toBe(0);
+    expect(limited[5]).not.toBe(0);
+  });
+
+  it("rejects non-finite, near-singular, orientation-flipping, and ill-conditioned corrections", () => {
+    const limits = {
+      imageWidthPx: 1280,
+      imageHeightPx: 720,
+      maxPointDisplacementPx: 120,
+      maxConditionNumber: 20
+    };
+
+    expect(() =>
+      limitVisualResidual([1, 0, 0, 0, 1, 0, Number.NaN, 0, 1], limits)
+    ).toThrow(/finite/i);
+    expect(() =>
+      limitVisualResidual([1, 0, 0, 0, 1e-12, 0, 0, 0, 1], limits)
+    ).toThrow(/singular/i);
+    expect(() =>
+      limitVisualResidual([-1, 0, 0, 0, 1, 0, 0, 0, 1], limits)
+    ).toThrow(/orientation/i);
+    expect(() =>
+      limitVisualResidual([50, 0, 0, 0, 0.02, 0, 0, 0, 1], limits)
+    ).toThrow(/condition/i);
+  });
+
+  it("bounds full-image displacement without discarding scale, shear, or projective terms", () => {
+    const raw: Mat3 = [
+      1.1, 0.1, 0.0005,
+      0.05, 0.95, -0.0003,
+      300, -200, 1
+    ];
+    const limited = limitVisualResidual(raw, {
+      imageWidthPx: 1280,
+      imageHeightPx: 720,
+      maxPointDisplacementPx: 80,
+      maxConditionNumber: 20
+    });
+    const points = [
+      { xPx: 0, yPx: 0 },
+      { xPx: 1280, yPx: 0 },
+      { xPx: 0, yPx: 720 },
+      { xPx: 1280, yPx: 720 },
+      { xPx: 640, yPx: 360 }
+    ];
+
+    for (const point of points) {
+      const transformed = applyMat3ToPixel(limited, point);
+      expect(Math.hypot(transformed.xPx - point.xPx, transformed.yPx - point.yPx))
+        .toBeLessThanOrEqual(80.001);
+    }
+    expect(limited[0]).not.toBe(1);
+    expect(limited[3]).not.toBe(0);
+    expect(limited[2]).not.toBe(0);
+    expect(limited[5]).not.toBe(0);
   });
 
   it("computes K delta-R K^-1 in full-image pixels", () => {

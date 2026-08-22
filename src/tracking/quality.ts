@@ -89,6 +89,8 @@ export class TrackingQualityGate {
         this.hasLocked = true;
         this.currentState = "locked";
       }
+    } else if (this.currentState === "realign") {
+      this.recoveryFrames = 0;
     } else if (
       this.criticalFrames >= this.thresholds.realignConsecutiveFrames
     ) {

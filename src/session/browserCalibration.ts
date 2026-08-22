@@ -28,12 +28,18 @@ export type BrowserCalibrationRuntime = {
   dispose(): void;
 };
 
+export type CameraImageDimensions = {
+  imageWidthPx: number;
+  imageHeightPx: number;
+};
+
 export function createBrowserCalibrationRuntime(
-  stream: MediaStream
+  stream: MediaStream,
+  deliveredDimensions?: Readonly<CameraImageDimensions>
 ): BrowserCalibrationRuntime {
   const settings = stream.getVideoTracks()[0]?.getSettings();
-  const imageWidthPx = settings?.width ?? 1280;
-  const imageHeightPx = settings?.height ?? 720;
+  const imageWidthPx = deliveredDimensions?.imageWidthPx ?? settings?.width ?? 1280;
+  const imageHeightPx = deliveredDimensions?.imageHeightPx ?? settings?.height ?? 720;
   const screenWidthPx = Math.max(1, window.innerWidth);
   const screenHeightPx = Math.max(1, window.innerHeight);
   const intrinsics = buildApproximateIntrinsics(imageWidthPx, imageHeightPx);

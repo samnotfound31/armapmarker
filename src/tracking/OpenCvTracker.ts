@@ -2,11 +2,11 @@ import type { Mat3, TrackingQuality } from "../domain/types";
 import type { CV, Mat } from "@techstark/opencv-js";
 import { TrackingQualityGate } from "./quality";
 import {
-  computeResidualHomography,
   invertHomography,
   multiplyHomographies,
   normalizeHomography,
-  limitVisualResidual
+  limitVisualResidual,
+  DEFAULT_VISUAL_RESIDUAL_LIMITS
 } from "./residualHomography";
 import type { TrackerResult } from "./types";
 
@@ -17,6 +17,8 @@ export type CvAllocation = {
 export type PreparedCvFrame = {
   resources: readonly CvAllocation[];
   candidateCount: number;
+  imageWidthPx: number;
+  imageHeightPx: number;
   trackingFromImage: Mat3;
   opaque: unknown;
 };
@@ -132,24 +134,31 @@ export class OpenCvTracker {
         };
       }
 
-      const frameVisualHomography = computeResidualHomography(
-        observedHomography,
-        sensorHomography
-      );
-      this.residualSinceKeyframe = normalizeHomography(
+      const previousAccumulatedHomography = normalizeHomography(
         multiplyHomographies(
-          frameVisualHomography,
-          this.residualSinceKeyframe
+          this.residualSinceKeyframe,
+          this.keyframeBaseHomography
         )
       );
       const accumulatedVisualHomography = limitVisualResidual(
         normalizeHomography(
           multiplyHomographies(
-            this.residualSinceKeyframe,
-            this.keyframeBaseHomography
+            observedHomography,
+            multiplyHomographies(
+              previousAccumulatedHomography,
+              invertHomography(sensorHomography)
+            )
           )
-        )
+        ),
+        {
+          imageWidthPx: currentFrame.imageWidthPx,
+          imageHeightPx: currentFrame.imageHeightPx,
+          maxPointDisplacementPx:
+            DEFAULT_VISUAL_RESIDUAL_LIMITS.maxPointDisplacementPx,
+          maxConditionNumber: DEFAULT_VISUAL_RESIDUAL_LIMITS.maxConditionNumber
+        }
       );
+      let replacedKeyframe = false;
       if (outcome.quality.state === "locked") {
         this.framesSinceKeyframe += 1;
         if (
@@ -160,7 +169,16 @@ export class OpenCvTracker {
           this.residualSinceKeyframe = IDENTITY_HOMOGRAPHY;
           this.keyframeId += 1;
           this.framesSinceKeyframe = 0;
+          replacedKeyframe = true;
         }
+      }
+      if (!replacedKeyframe) {
+        this.residualSinceKeyframe = normalizeHomography(
+          multiplyHomographies(
+            accumulatedVisualHomography,
+            invertHomography(this.keyframeBaseHomography)
+          )
+        );
       }
       this.previousFrame = currentFrame;
       deleteAllocations(previousFrame.resources);
@@ -227,20 +245,15 @@ class OpenCvJsAdapter implements OpenCvAdapter {
       );
       const roiHeader = resized.roi(new this.cv.Rect(0, roiTop, width, height - roiTop));
       const grayRoadRoi = roiHeader.clone();
-      const features = new this.cv.Mat();
+      const features = detectGoodFeatures(this.cv, grayRoadRoi);
       allocations.push(roiHeader, grayRoadRoi, features);
-      this.cv.goodFeaturesToTrack(
-        grayRoadRoi,
-        features,
-        OPENCV_CONFIG.maxFeatures,
-        OPENCV_CONFIG.featureQuality,
-        OPENCV_CONFIG.minimumFeatureDistancePx
-      );
 
       deleteAllocations([rgba, grayscale, resized, roiHeader]);
       return {
         resources: [grayRoadRoi, features],
         candidateCount: features.rows,
+        imageWidthPx: imageData.width,
+        imageHeightPx: imageData.height,
         trackingFromImage: [
           scale, 0, 0,
           0, scale, 0,
@@ -297,8 +310,8 @@ class OpenCvJsAdapter implements OpenCvAdapter {
         previous.features.data32F,
         nextPoints.data32F,
         backwardPoints.data32F,
-        forwardStatus.data8U,
-        backwardStatus.data8U,
+        unsignedByteData(forwardStatus),
+        unsignedByteData(backwardStatus),
         OPENCV_CONFIG.forwardBackwardErrorPx
       );
       if (matches.count < 4) {
@@ -335,7 +348,7 @@ class OpenCvJsAdapter implements OpenCvAdapter {
       const reprojectionErrors = calculateReprojectionErrors(
         matches.source,
         matches.destination,
-        inlierMask.data8U,
+        unsignedByteData(inlierMask),
         homography
       );
       const inlierCount = reprojectionErrors.length;
@@ -372,9 +385,11 @@ export function toFullImageHomography(
 }
 
 async function loadOpenCv(): Promise<CV> {
-  const imported = await import("@techstark/opencv-js");
-  const moduleValue = (imported as unknown as { default?: unknown }).default ?? imported;
-  const candidate = await Promise.resolve(moduleValue as CV | Promise<CV>);
+  const imported = await import("./openCvRuntime");
+  const moduleValue = unwrapDefaultExport(imported);
+  const candidate = moduleValue instanceof Promise
+    ? await moduleValue as CV
+    : moduleValue as CV;
   if (candidate.Mat) return candidate;
 
   await new Promise<void>((resolve, reject) => {
@@ -390,6 +405,19 @@ async function loadOpenCv(): Promise<CV> {
   });
   if (!candidate.Mat) throw new Error("OpenCV runtime is unavailable.");
   return candidate;
+}
+
+function unwrapDefaultExport(value: unknown): unknown {
+  let current = value;
+  for (let depth = 0; depth < 4; depth += 1) {
+    if (!current || (typeof current !== "object" && typeof current !== "function")) {
+      break;
+    }
+    const next = (current as { default?: unknown }).default;
+    if (next === undefined || next === current) break;
+    current = next;
+  }
+  return current;
 }
 
 function readImageData(frame: ImageBitmap | ImageData): ImageData {
@@ -419,6 +447,81 @@ function assertOpenCvFrame(value: unknown): OpenCvFrameOpaque {
     throw new TypeError("OpenCV frame state is invalid.");
   }
   return value as OpenCvFrameOpaque;
+}
+
+function unsignedByteData(matrix: Mat): Uint8Array {
+  const runtimeMatrix = matrix as Mat & {
+    data8U?: Uint8Array;
+    data?: Uint8Array;
+  };
+  const data = runtimeMatrix.data8U ?? runtimeMatrix.data;
+  if (!data) throw new Error("OpenCV returned no unsigned-byte matrix data.");
+  return data;
+}
+
+type RuntimeFeatureDetector = CvAllocation & {
+  detect(image: Mat, keypoints: RuntimeKeyPointVector): void;
+};
+
+type RuntimeKeyPointVector = CvAllocation & {
+  size(): number;
+  get(index: number): { pt: { x: number; y: number } };
+};
+
+type CvWithRuntimeFeatureDetector = CV & {
+  GFTTDetector?: new (
+    maxFeatures: number,
+    qualityLevel: number,
+    minimumDistancePx: number
+  ) => RuntimeFeatureDetector;
+  KeyPointVector?: new () => RuntimeKeyPointVector;
+};
+
+function detectGoodFeatures(cv: CV, image: Mat): Mat {
+  if (typeof cv.goodFeaturesToTrack === "function") {
+    const features = new cv.Mat();
+    try {
+      cv.goodFeaturesToTrack(
+        image,
+        features,
+        OPENCV_CONFIG.maxFeatures,
+        OPENCV_CONFIG.featureQuality,
+        OPENCV_CONFIG.minimumFeatureDistancePx
+      );
+      return features;
+    } catch (error) {
+      features.delete();
+      throw error;
+    }
+  }
+
+  const runtime = cv as CvWithRuntimeFeatureDetector;
+  if (!runtime.GFTTDetector || !runtime.KeyPointVector) {
+    throw new Error("This OpenCV runtime has no supported road-feature detector.");
+  }
+  const detector = new runtime.GFTTDetector(
+    OPENCV_CONFIG.maxFeatures,
+    OPENCV_CONFIG.featureQuality,
+    OPENCV_CONFIG.minimumFeatureDistancePx
+  );
+  const keypoints = new runtime.KeyPointVector();
+  try {
+    detector.detect(image, keypoints);
+    const pointData: number[] = [];
+    for (let index = 0; index < keypoints.size(); index += 1) {
+      const point = keypoints.get(index).pt;
+      pointData.push(point.x, point.y);
+    }
+    return cv.matFromArray(
+      pointData.length / 2,
+      1,
+      cv.CV_32FC2,
+      pointData
+    );
+  } finally {
+    keypoints.delete();
+    detector.delete();
+  }
 }
 
 function collectForwardBackwardMatches(

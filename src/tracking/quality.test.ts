@@ -58,6 +58,23 @@ describe("TrackingQualityGate", () => {
     expect(gate.state).toBe("locked");
   });
 
+  it("latches realign through later stable frames until a fresh gate is constructed", () => {
+    const gate = lockedGate();
+    const critical = [...outliers, ...outliers].slice(0, 10).map((observation, index) => ({
+      ...observation,
+      timestampMs: 1300 + index * 33
+    }));
+    critical.forEach((observation) => gate.update(observation));
+    expect(gate.state).toBe("realign");
+
+    for (let index = 0; index < 12; index += 1) {
+      gate.update({ ...good[index % good.length]!, timestampMs: 2000 + index * 33 });
+    }
+
+    expect(gate.state).toBe("realign");
+    expect(new TrackingQualityGate(DEFAULT_TRACKING_THRESHOLDS).state).toBe("weak");
+  });
+
   it("rejects observations and homographies older than 250 milliseconds", () => {
     const gate = lockedGate();
     const outcome = gate.update(

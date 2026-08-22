@@ -84,6 +84,32 @@ describe("calibrationReducer", () => {
     expect(state.retryReason).toMatch(/two metres/i);
   });
 
+  it.each<{
+    label: string;
+    near: [number, number, number];
+    far: [number, number, number];
+  }>([
+    { label: "closer to the camera", near: [0, 0, 6], far: [0, 0, 3] },
+    { label: "sideways", near: [0, 0, 3], far: [3, 0, 3] },
+    { label: "behind the camera", near: [0, 0, 3], far: [0, 0, -4] }
+  ])("rejects a $label far tap even with enough separation", ({ near, far }) => {
+    let state = readyForNearTap();
+    state = reduce(state, { type: "TAP_GROUND", point: near });
+    state = reduce(state, { type: "TAP_GROUND", point: far });
+
+    expect(state.stage).toBe("tap-far");
+    expect(state.retryReason).toMatch(/farther ahead.*road/i);
+  });
+
+  it("accepts a farther forward tap that follows a curved-perspective road", () => {
+    let state = readyForNearTap();
+    state = reduce(state, { type: "TAP_GROUND", point: [-0.5, 0, 3] });
+    state = reduce(state, { type: "TAP_GROUND", point: [1.5, 0, 6] });
+
+    expect(state.stage).toBe("scan-features");
+    expect(state.farGround).toEqual([1.5, 0, 6]);
+  });
+
   it("requires twenty stable scan samples and resets on excess motion", () => {
     let state = readyForScan();
     for (let sample = 0; sample < 19; sample += 1) {

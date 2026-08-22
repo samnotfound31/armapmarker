@@ -7,7 +7,8 @@ export default defineConfig({
   timeout: 30_000,
   expect: { timeout: 5_000 },
   use: {
-    baseURL: "http://127.0.0.1:4173",
+    baseURL: "https://127.0.0.1:4173",
+    ignoreHTTPSErrors: true,
     geolocation: { latitude: 22.57, longitude: 88.36 },
     permissions: ["geolocation"],
     trace: "retain-on-failure"
@@ -23,8 +24,9 @@ export default defineConfig({
     }
   ],
   webServer: {
-    command: "npm run dev -- --host 127.0.0.1 --port 4173",
-    url: "http://127.0.0.1:4173",
+    command: "npm run preview:e2e",
+    url: "https://127.0.0.1:4173",
+    ignoreHTTPSErrors: true,
     reuseExistingServer: true,
     timeout: 120_000
   }

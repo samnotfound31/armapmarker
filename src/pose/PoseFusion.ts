@@ -37,16 +37,16 @@ export type PoseFusionConfig = {
   maxFreshVisualAgeMs: number;
   visualFadeDurationMs: number;
   weakVisualWeight: number;
-  maxHeadingCorrectionRad: number;
-  maxTranslationCorrectionPx: number;
+  maxVisualDisplacementPx: number;
+  maxVisualConditionNumber: number;
 };
 
 const DEFAULT_CONFIG: Readonly<PoseFusionConfig> = {
   maxFreshVisualAgeMs: 250,
   visualFadeDurationMs: 500,
   weakVisualWeight: 0.45,
-  maxHeadingCorrectionRad: 0.12,
-  maxTranslationCorrectionPx: 80
+  maxVisualDisplacementPx: 80,
+  maxVisualConditionNumber: 20
 };
 
 export class PoseFusion {
@@ -58,6 +58,8 @@ export class PoseFusion {
   private lastGpsTimestampMs = Number.NEGATIVE_INFINITY;
   private lastSensorTimestampMs = Number.NEGATIVE_INFINITY;
   private lastVisualTimestampMs = Number.NEGATIVE_INFINITY;
+  private readonly imageWidthPx: number;
+  private readonly imageHeightPx: number;
 
   constructor(
     calibration: GroundCalibration,
@@ -66,6 +68,8 @@ export class PoseFusion {
     this.routeProgressMeters = calibration.calibrationRouteDistanceMeters;
     this.cameraPositionGroundMeters = [0, calibration.cameraHeightMeters, 0];
     this.cameraFromGround = calibration.cameraFromGroundAtLock;
+    this.imageWidthPx = calibration.intrinsics.imageWidthPx;
+    this.imageHeightPx = calibration.intrinsics.imageHeightPx;
   }
 
   updateGps(update: GpsPoseUpdate): boolean {
@@ -97,8 +101,10 @@ export class PoseFusion {
     this.visual = {
       ...update,
       imageHomography: limitVisualResidual(update.imageHomography, {
-        maxRotationRad: this.config.maxHeadingCorrectionRad,
-        maxTranslationPx: this.config.maxTranslationCorrectionPx
+        imageWidthPx: this.imageWidthPx,
+        imageHeightPx: this.imageHeightPx,
+        maxPointDisplacementPx: this.config.maxVisualDisplacementPx,
+        maxConditionNumber: this.config.maxVisualConditionNumber
       })
     };
     return true;
@@ -139,7 +145,7 @@ export class PoseFusion {
           ? this.config.weakVisualWeight
           : 0;
     return {
-      imageHomography: scaleRigidCorrection(
+      imageHomography: scaleProjectiveCorrection(
         this.visual.imageHomography,
         ageWeight * qualityWeight
       ),
@@ -158,18 +164,16 @@ export class PoseFusion {
   }
 }
 
-function scaleRigidCorrection(matrix: Mat3, weight: number): Mat3 {
+function scaleProjectiveCorrection(matrix: Mat3, weight: number): Mat3 {
   if (weight <= 0) return IDENTITY_MAT3;
-  const rotation = Math.atan2(matrix[1], matrix[0]) * weight;
-  const cosine = Math.cos(rotation);
-  const sine = Math.sin(rotation);
+  if (weight >= 1) return matrix;
   return [
-    cosine,
-    sine,
-    0,
-    -sine,
-    cosine,
-    0,
+    1 + (matrix[0] - 1) * weight,
+    matrix[1] * weight,
+    matrix[2] * weight,
+    matrix[3] * weight,
+    1 + (matrix[4] - 1) * weight,
+    matrix[5] * weight,
     matrix[6] * weight,
     matrix[7] * weight,
     1

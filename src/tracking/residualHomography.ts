@@ -3,13 +3,17 @@ import type { CameraIntrinsics, Mat3 } from "../domain/types";
 const EPSILON = 1e-10;
 
 export type VisualResidualLimits = {
-  maxTranslationPx: number;
-  maxRotationRad: number;
+  imageWidthPx: number;
+  imageHeightPx: number;
+  maxPointDisplacementPx: number;
+  maxConditionNumber: number;
 };
 
 export const DEFAULT_VISUAL_RESIDUAL_LIMITS: Readonly<VisualResidualLimits> = {
-  maxTranslationPx: 80,
-  maxRotationRad: 0.15
+  imageWidthPx: 1280,
+  imageHeightPx: 720,
+  maxPointDisplacementPx: 80,
+  maxConditionNumber: 20
 };
 
 export function computeResidualHomography(
@@ -112,31 +116,29 @@ export function limitVisualResidual(
   limits: Readonly<VisualResidualLimits> = DEFAULT_VISUAL_RESIDUAL_LIMITS
 ): Mat3 {
   const normalized = normalizeHomography(matrix);
-  const rotation = clamp(
-    Math.atan2(normalized[1], normalized[0]),
-    -limits.maxRotationRad,
-    limits.maxRotationRad
-  );
-  const translationLength = Math.hypot(normalized[6], normalized[7]);
-  const translationScale =
-    translationLength > limits.maxTranslationPx
-      ? limits.maxTranslationPx / translationLength
-      : 1;
-  const translationX = normalized[6] * translationScale;
-  const translationY = normalized[7] * translationScale;
-  const cosine = Math.cos(rotation);
-  const sine = Math.sin(rotation);
-  return [
-    cosine,
-    sine,
-    0,
-    -sine,
-    cosine,
-    0,
-    translationX,
-    translationY,
-    1
-  ];
+  assertVisualResidualLimits(limits);
+  assertPlausibleProjectiveMatrix(normalized, limits);
+  if (maximumSampleDisplacement(normalized, limits) <= limits.maxPointDisplacementPx) {
+    return normalized;
+  }
+
+  let lowerWeight = 0;
+  let upperWeight = 1;
+  for (let iteration = 0; iteration < 48; iteration += 1) {
+    const weight = (lowerWeight + upperWeight) / 2;
+    const candidate = interpolateFromIdentity(normalized, weight);
+    if (
+      maximumSampleDisplacement(candidate, limits) <=
+      limits.maxPointDisplacementPx
+    ) {
+      lowerWeight = weight;
+    } else {
+      upperWeight = weight;
+    }
+  }
+  const bounded = interpolateFromIdentity(normalized, lowerWeight);
+  assertPlausibleProjectiveMatrix(bounded, limits);
+  return bounded;
 }
 
 function assertFiniteMatrix(matrix: Mat3): void {
@@ -145,6 +147,123 @@ function assertFiniteMatrix(matrix: Mat3): void {
   }
 }
 
-function clamp(value: number, minimum: number, maximum: number): number {
-  return Math.min(maximum, Math.max(minimum, value));
+function assertVisualResidualLimits(limits: Readonly<VisualResidualLimits>): void {
+  const values = [
+    limits.imageWidthPx,
+    limits.imageHeightPx,
+    limits.maxPointDisplacementPx,
+    limits.maxConditionNumber
+  ];
+  if (values.some((value) => !Number.isFinite(value) || value <= 0)) {
+    throw new RangeError("Visual residual bounds must be positive and finite.");
+  }
+}
+
+function assertPlausibleProjectiveMatrix(
+  matrix: Mat3,
+  limits: Readonly<VisualResidualLimits>
+): void {
+  const normalizedCoordinates = toNormalizedImageCoordinates(matrix, limits);
+  const determinant = determinant3(normalizedCoordinates);
+  if (Math.abs(determinant) <= 1e-8) {
+    throw new RangeError("Homography is near-singular.");
+  }
+  if (determinant < 0) {
+    throw new RangeError("Homography reverses image orientation.");
+  }
+  const conditionNumber = frobeniusConditionNumber(normalizedCoordinates);
+  if (!Number.isFinite(conditionNumber) || conditionNumber > limits.maxConditionNumber) {
+    throw new RangeError("Homography condition number is unreasonable.");
+  }
+  for (const point of samplePoints(limits)) {
+    const denominator =
+      matrix[2] * point.xPx + matrix[5] * point.yPx + matrix[8];
+    if (!Number.isFinite(denominator) || denominator <= 1e-6) {
+      throw new RangeError("Homography reverses orientation within the image.");
+    }
+  }
+}
+
+function toNormalizedImageCoordinates(
+  matrix: Mat3,
+  limits: Readonly<VisualResidualLimits>
+): Mat3 {
+  const halfWidth = limits.imageWidthPx / 2;
+  const halfHeight = limits.imageHeightPx / 2;
+  const imageFromNormalized: Mat3 = [
+    halfWidth, 0, 0,
+    0, halfHeight, 0,
+    halfWidth, halfHeight, 1
+  ];
+  const normalizedFromImage: Mat3 = [
+    1 / halfWidth, 0, 0,
+    0, 1 / halfHeight, 0,
+    -1, -1, 1
+  ];
+  return normalizeHomography(
+    multiplyHomographies(
+      normalizedFromImage,
+      multiplyHomographies(matrix, imageFromNormalized)
+    )
+  );
+}
+
+function frobeniusConditionNumber(matrix: Mat3): number {
+  const inverse = invertHomography(matrix);
+  return (
+    Math.hypot(...matrix) * Math.hypot(...inverse) / 3
+  );
+}
+
+function determinant3(matrix: Mat3): number {
+  return (
+    matrix[0] * (matrix[4] * matrix[8] - matrix[7] * matrix[5]) -
+    matrix[3] * (matrix[1] * matrix[8] - matrix[7] * matrix[2]) +
+    matrix[6] * (matrix[1] * matrix[5] - matrix[4] * matrix[2])
+  );
+}
+
+function maximumSampleDisplacement(
+  matrix: Mat3,
+  limits: Readonly<VisualResidualLimits>
+): number {
+  return Math.max(
+    ...samplePoints(limits).map((point) => {
+      const transformed = transformPoint(matrix, point.xPx, point.yPx);
+      return Math.hypot(transformed.xPx - point.xPx, transformed.yPx - point.yPx);
+    })
+  );
+}
+
+function samplePoints(limits: Readonly<VisualResidualLimits>) {
+  const { imageWidthPx: width, imageHeightPx: height } = limits;
+  return [
+    { xPx: 0, yPx: 0 },
+    { xPx: width, yPx: 0 },
+    { xPx: 0, yPx: height },
+    { xPx: width, yPx: height },
+    { xPx: width / 2, yPx: height / 2 }
+  ];
+}
+
+function transformPoint(matrix: Mat3, xPx: number, yPx: number) {
+  const denominator = matrix[2] * xPx + matrix[5] * yPx + matrix[8];
+  return {
+    xPx: (matrix[0] * xPx + matrix[3] * yPx + matrix[6]) / denominator,
+    yPx: (matrix[1] * xPx + matrix[4] * yPx + matrix[7]) / denominator
+  };
+}
+
+function interpolateFromIdentity(matrix: Mat3, weight: number): Mat3 {
+  return normalizeHomography([
+    1 + (matrix[0] - 1) * weight,
+    matrix[1] * weight,
+    matrix[2] * weight,
+    matrix[3] * weight,
+    1 + (matrix[4] - 1) * weight,
+    matrix[5] * weight,
+    matrix[6] * weight,
+    matrix[7] * weight,
+    1 + (matrix[8] - 1) * weight
+  ]);
 }

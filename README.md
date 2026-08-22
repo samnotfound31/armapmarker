@@ -88,6 +88,8 @@ Review the hosting provider's request logs and Google Maps Platform terms before
 
 The repository includes `vercel.json` for SPA routing, the `/api/routes` server function, no-store API responses, a restrictive Content Security Policy, and camera/location/sensor permissions limited to the same origin.
 
+The pinned `@techstark/opencv-js` runtime compiles WebAssembly and constructs Embind functions dynamically, so `script-src` explicitly allows both `'wasm-unsafe-eval'` and `'unsafe-eval'`. The latter weakens script-injection defense even though script origins remain restricted to this app and the two Google Maps origins. A future hardening migration should replace the package with a CSP-safe OpenCV build that uses precompiled bindings, verify it with the production-header runtime smoke, and then remove `'unsafe-eval'` (and `'wasm-unsafe-eval'` if the replacement no longer compiles Wasm in-browser).
+
 Deploy the repository to Vercel, configure both environment variables there, and test only through the generated HTTPS URL. Do not put the server key in client-visible project settings.
 
 ## Project documents

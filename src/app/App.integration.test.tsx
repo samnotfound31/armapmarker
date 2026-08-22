@@ -7,6 +7,7 @@ import type { DestinationSearchAdapter } from "../components/SearchScreen";
 import { buildApproximateIntrinsics } from "../geometry/intrinsics";
 import { FakeRenderer } from "../test/fakes/FakeRenderer";
 import { IDENTITY_MAT3, IDENTITY_MAT4 } from "../test/geometryFixtures";
+import type { SessionStore } from "../session/sessionStore";
 import {
   App,
   type AppNavigationSessionInput,
@@ -173,6 +174,97 @@ describe("App integrated AR walk", () => {
     expect(await screen.findByRole("heading", { name: "City Museum" })).toBeVisible();
     expect(screen.getByRole("alert")).toHaveTextContent(/opencv could not initialize/i);
     expect(screen.queryByLabelText(/augmented reality navigation view/i)).not.toBeInTheDocument();
+  });
+
+  it("releases the active AR session and camera when WebGL context is lost", async () => {
+    const recovery = await setupRecoveryApp();
+    const canvas = screen
+      .getByLabelText(/augmented reality navigation view/i)
+      .querySelector("canvas")!;
+
+    act(() => {
+      canvas.dispatchEvent(new Event("webglcontextlost", { cancelable: true }));
+      canvas.dispatchEvent(new Event("webglcontextlost", { cancelable: true }));
+    });
+
+    expect(await screen.findByRole("heading", { name: "City Museum" })).toBeVisible();
+    expect(screen.getByRole("alert")).toHaveTextContent(/webgl context was lost/i);
+    expect(recovery.sessionStops[0]).toHaveBeenCalledOnce();
+    expect(recovery.track.stop).toHaveBeenCalledOnce();
+    expect(screen.queryByLabelText(/augmented reality navigation view/i)).not.toBeInTheDocument();
+  });
+
+  it("releases resources and returns to preview when renderer construction fails", async () => {
+    const recovery = await setupRecoveryApp({
+      startAt: "calibration",
+      failRenderer: true
+    });
+
+    await completeCalibration();
+
+    expect(await screen.findByRole("heading", { name: "City Museum" })).toBeVisible();
+    expect(screen.getByRole("alert")).toHaveTextContent(/webgl context unavailable/i);
+    expect(recovery.sessionStops[0]).toHaveBeenCalledOnce();
+    expect(recovery.track.stop).toHaveBeenCalledOnce();
+  });
+
+  it("rebuilds calibration from delivered video dimensions before AR resumes", async () => {
+    const recovery = await setupRecoveryApp();
+    const video = screen.getByLabelText(/rear camera view/i) as HTMLVideoElement;
+    Object.defineProperties(video, {
+      videoWidth: { configurable: true, value: 1920 },
+      videoHeight: { configurable: true, value: 1080 }
+    });
+
+    act(() => video.dispatchEvent(new Event("loadedmetadata")));
+
+    expect(recovery.sessionStops[0]).toHaveBeenCalledOnce();
+    expect(recovery.track.stop).not.toHaveBeenCalled();
+    expect(
+      await screen.findByRole("heading", { name: /align route to the road/i })
+    ).toBeVisible();
+    expect(recovery.createCalibrationRuntime).toHaveBeenCalledTimes(2);
+    expect(recovery.createCalibrationRuntime.mock.calls[1]?.[1]).toEqual({
+      imageWidthPx: 1920,
+      imageHeightPx: 1080
+    });
+
+    await completeCalibration();
+
+    expect(recovery.sessionInputs).toHaveLength(2);
+    expect(recovery.sessionInputs[1]?.calibration.intrinsics).toMatchObject({
+      imageWidthPx: 1920,
+      imageHeightPx: 1080
+    });
+  });
+
+  it("persists progress only for accepted GPS fixes, not sensor or tracker pose updates", async () => {
+    const save = vi.fn<SessionStore["save"]>();
+    const store: SessionStore = {
+      load: () => null,
+      save,
+      clear: vi.fn()
+    };
+    const recovery = await setupRecoveryApp({ sessionStore: store });
+    const writesAfterStageChange = save.mock.calls.length;
+
+    act(() => {
+      for (let index = 0; index < 40; index += 1) {
+        recovery.sessionInputs[0]?.onUpdate(
+          runtimeSnapshot(18 + index * 0.01, 82 - index * 0.01, false)
+        );
+      }
+    });
+
+    expect(save).toHaveBeenCalledTimes(writesAfterStageChange);
+    act(() => {
+      recovery.sessionInputs[0]?.onLocationAccepted?.(recovery.freshFix, 42);
+    });
+    expect(save).toHaveBeenCalledTimes(writesAfterStageChange + 1);
+    expect(save.mock.lastCall?.[0]).toMatchObject({
+      stage: "navigating",
+      displayedProgressMeters: 42
+    });
   });
 
   it("recomputes a nonzero calibration match from the latest accepted fix on re-alignment", async () => {
@@ -371,6 +463,8 @@ async function collectCalibrationEvidence(): Promise<void> {
 async function setupRecoveryApp(
   options: {
     failRecalculation?: boolean;
+    failRenderer?: boolean;
+    sessionStore?: SessionStore;
     startAt?: "calibration" | "navigating";
   } = {}
 ) {
@@ -412,8 +506,11 @@ async function setupRecoveryApp(
   const sessionInputs: AppNavigationSessionInput[] = [];
   const sessionStops: ReturnType<typeof vi.fn>[] = [];
   const calibrationRuntimes: CalibrationRuntime[] = [];
-  const createCalibrationRuntime = vi.fn(() => {
-    const runtime = calibrationRuntime();
+  const createCalibrationRuntime = vi.fn((
+    _grant: unknown,
+    dimensions?: { imageWidthPx: number; imageHeightPx: number }
+  ) => {
+    const runtime = calibrationRuntime(dimensions);
     calibrationRuntimes.push(runtime);
     return runtime;
   });
@@ -432,7 +529,11 @@ async function setupRecoveryApp(
         sessionStops.push(stop);
         return { start: async () => undefined, stop };
       }}
-      backendFactory={() => new FakeRenderer()}
+      sessionStore={options.sessionStore}
+      backendFactory={() => {
+        if (options.failRenderer) throw new Error("WebGL context unavailable");
+        return new FakeRenderer();
+      }}
     />
   );
   if (options.startAt === "calibration") await reachCalibration();
@@ -480,7 +581,12 @@ function destinationAdapter(): DestinationSearchAdapter {
   };
 }
 
-function calibrationRuntime(): CalibrationRuntime {
+function calibrationRuntime(
+  dimensions: { imageWidthPx: number; imageHeightPx: number } = {
+    imageWidthPx: 1280,
+    imageHeightPx: 720
+  }
+): CalibrationRuntime {
   return {
     feed: {
       captureOrientation: async () => ({
@@ -499,7 +605,10 @@ function calibrationRuntime(): CalibrationRuntime {
           angularMotionRad: 0.04
         }))
     },
-    intrinsics: buildApproximateIntrinsics(1280, 720),
+    intrinsics: buildApproximateIntrinsics(
+      dimensions.imageWidthPx,
+      dimensions.imageHeightPx
+    ),
     imageToScreen: IDENTITY_MAT3,
     screenPointToGround: ({ yPx }) => (yPx < 200 ? [0, 0, 3] : [0, 0, 6]),
     dispose: vi.fn()

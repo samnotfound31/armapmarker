@@ -20,20 +20,34 @@ export type ArViewportProps = {
   calibration: GroundCalibration;
   pose: PoseEstimate;
   backendFactory?: RouteRenderBackendFactory;
+  onFailure?: (failure: ArViewportFailure) => void;
 };
+
+export type ArViewportFailure =
+  | { kind: "renderer"; message: string }
+  | { kind: "context-lost"; message: string }
+  | {
+      kind: "video-dimensions";
+      message: string;
+      imageWidthPx: number;
+      imageHeightPx: number;
+    };
 
 export function ArViewport({
   stream,
   route,
   calibration,
   pose,
-  backendFactory
+  backendFactory,
+  onFailure
 }: ArViewportProps) {
   const hostRef = useRef<HTMLElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const poseRef = useRef(pose);
+  const failureCallbackRef = useRef(onFailure);
   const [compatibilityError, setCompatibilityError] = useState<string | null>(null);
+  failureCallbackRef.current = onFailure;
 
   useEffect(() => {
     poseRef.current = pose;
@@ -46,6 +60,13 @@ export function ArViewport({
     if (!host || !video || !canvas) return;
 
     video.srcObject = stream;
+    let failureReported = false;
+    const reportFailure = (failure: ArViewportFailure) => {
+      if (failureReported) return;
+      failureReported = true;
+      setCompatibilityError(failure.message);
+      failureCallbackRef.current?.(failure);
+    };
     let renderer: RouteRenderer;
     try {
       renderer = new RouteRenderer({
@@ -55,7 +76,7 @@ export function ArViewport({
         ...(backendFactory ? { backendFactory } : {})
       });
     } catch (error) {
-      setCompatibilityError(errorMessage(error));
+      reportFailure({ kind: "renderer", message: errorMessage(error) });
       video.srcObject = null;
       return;
     }
@@ -95,7 +116,32 @@ export function ArViewport({
     });
     resizeObserver.observe(host);
 
-    const onLoadedMetadata = () => resize(lastWidth, lastHeight);
+    const onLoadedMetadata = () => {
+      const imageWidthPx = video.videoWidth;
+      const imageHeightPx = video.videoHeight;
+      if (
+        imageWidthPx > 0 &&
+        imageHeightPx > 0 &&
+        dimensionsMateriallyDiffer(
+          imageWidthPx,
+          imageHeightPx,
+          calibration.intrinsics.imageWidthPx,
+          calibration.intrinsics.imageHeightPx
+        )
+      ) {
+        reportFailure({
+          kind: "video-dimensions",
+          message:
+            `Camera resolution changed from ` +
+            `${calibration.intrinsics.imageWidthPx}×${calibration.intrinsics.imageHeightPx} ` +
+            `to ${imageWidthPx}×${imageHeightPx}. Re-align the road before AR resumes.`,
+          imageWidthPx,
+          imageHeightPx
+        });
+        return;
+      }
+      resize(lastWidth, lastHeight);
+    };
     video.addEventListener("loadedmetadata", onLoadedMetadata);
 
     const renderFrame = () => {
@@ -117,12 +163,22 @@ export function ArViewport({
       if (document.visibilityState === "hidden") stopFrames();
       else startFrames();
     };
+    const onContextLost = (event: Event) => {
+      event.preventDefault();
+      stopFrames();
+      reportFailure({
+        kind: "context-lost",
+        message: "The WebGL context was lost."
+      });
+    };
     document.addEventListener("visibilitychange", onVisibilityChange);
+    canvas.addEventListener("webglcontextlost", onContextLost);
     startFrames();
 
     return () => {
       stopFrames();
       document.removeEventListener("visibilitychange", onVisibilityChange);
+      canvas.removeEventListener("webglcontextlost", onContextLost);
       video.removeEventListener("loadedmetadata", onLoadedMetadata);
       resizeObserver.disconnect();
       renderer.dispose();
@@ -158,4 +214,16 @@ function errorMessage(error: unknown): string {
   return error instanceof Error && error.message
     ? error.message
     : "This browser could not create the AR overlay.";
+}
+
+function dimensionsMateriallyDiffer(
+  actualWidthPx: number,
+  actualHeightPx: number,
+  expectedWidthPx: number,
+  expectedHeightPx: number
+): boolean {
+  return (
+    Math.abs(actualWidthPx - expectedWidthPx) / expectedWidthPx > 0.01 ||
+    Math.abs(actualHeightPx - expectedHeightPx) / expectedHeightPx > 0.01
+  );
 }

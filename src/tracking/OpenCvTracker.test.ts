@@ -170,13 +170,70 @@ describe("OpenCvTracker", () => {
     expect(replacement.keyframeId).toBe(initial.keyframeId + 1);
     expect(replacement.visualHomography?.[6]).toBeCloseTo(4);
   });
+
+  it("composes non-commuting observed, accumulated, and sensor motion in column-vector order across keyframes", async () => {
+    const quarterTurn: Mat3 = [
+      0, 1, 0,
+      -1, 0, 0,
+      0, 0, 1
+    ];
+    const observedTranslationThenTurn: Mat3 = [
+      0, 1, 0,
+      -1, 0, 0,
+      10, 0, 1
+    ];
+    const observedProjectiveThenTurn: Mat3 = [
+      0, 1, 0,
+      -1, 0, -0.00002,
+      0, 0, 1
+    ];
+    const fake = createFakeAdapter({
+      homographies: [
+        observedTranslationThenTurn,
+        observedProjectiveThenTurn,
+        SENSOR_IDENTITY
+      ]
+    });
+    const tracker = new OpenCvTracker(fake.adapter, {
+      keyframeReplacementIntervalFrames: 2
+    });
+
+    const initial = await tracker.process({} as ImageBitmap, 1000, SENSOR_IDENTITY);
+    const translated = await tracker.process({} as ImageBitmap, 1033, quarterTurn);
+    const replacement = await tracker.process({} as ImageBitmap, 1066, quarterTurn);
+    const afterReplacement = await tracker.process(
+      {} as ImageBitmap,
+      1099,
+      SENSOR_IDENTITY
+    );
+
+    expect(applyMat3ToPixel(translated.visualHomography!, { xPx: 100, yPx: 50 }))
+      .toEqual({ xPx: expect.closeTo(110), yPx: expect.closeTo(50) });
+    expect(applyMat3ToPixel(replacement.visualHomography!, { xPx: 100, yPx: 50 }))
+      .toEqual({
+        xPx: expect.closeTo(99.800399, 5),
+        yPx: expect.closeTo(59.88024, 5)
+      });
+    expect(replacement.keyframeId).toBe(initial.keyframeId + 1);
+    expect(applyMat3ToPixel(afterReplacement.visualHomography!, { xPx: 100, yPx: 50 }))
+      .toEqual({
+        xPx: expect.closeTo(99.800399, 5),
+        yPx: expect.closeTo(59.88024, 5)
+      });
+  });
 });
 
 function createFakeAdapter(
-  options: { homography?: Mat3 | null; inlierCount?: number; throwOnTrack?: boolean } = {}
+  options: {
+    homography?: Mat3 | null;
+    homographies?: readonly (Mat3 | null)[];
+    inlierCount?: number;
+    throwOnTrack?: boolean;
+  } = {}
 ) {
   const frameBundles: TestAllocation[][] = [];
   const estimateResources = [allocation(), allocation(), allocation(), allocation(), allocation()];
+  let trackIndex = 0;
   const adapter: OpenCvAdapter = {
     prepareFrame: vi.fn(() => {
       const resources = [allocation(), allocation(), allocation()];
@@ -184,22 +241,28 @@ function createFakeAdapter(
       return {
         resources,
         candidateCount: 42,
+        imageWidthPx: 1280,
+        imageHeightPx: 720,
         trackingFromImage: SENSOR_IDENTITY,
         opaque: { frameIndex: frameBundles.length }
       };
     }),
     track: vi.fn(() => {
       if (options.throwOnTrack) throw new Error("synthetic OpenCV failure");
+      const sequenceHomography = options.homographies?.[trackIndex];
+      trackIndex += 1;
+      const homography = options.homographies
+        ? sequenceHomography ?? null
+        : options.homography === undefined
+          ? ([1, 0, 0, 0, 1, 0, 4, -1, 1] satisfies Mat3)
+          : options.homography;
       return {
         resources: estimateResources,
-        homography:
-          options.homography === undefined
-            ? ([1, 0, 0, 0, 1, 0, 4, -1, 1] satisfies Mat3)
-            : options.homography,
+        homography,
         trackedFeatureCount: 32,
         inlierCount: options.inlierCount ?? 24,
         medianReprojectionErrorPx: 1.2,
-        motionValid: options.homography !== null
+        motionValid: homography !== null
       };
     })
   };

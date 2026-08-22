@@ -107,6 +107,20 @@ export function calibrationReducer(
         };
       }
       if (state.stage === "tap-far" && state.nearGround) {
+        const nearRange = Math.hypot(
+          state.nearGround[0],
+          state.nearGround[2]
+        );
+        const farRange = Math.hypot(event.point[0], event.point[2]);
+        if (
+          farRange <= nearRange ||
+          event.point[2] <= state.nearGround[2]
+        ) {
+          return reject(
+            state,
+            "Tap farther ahead along the road, beyond the near point and away from the camera."
+          );
+        }
         const separation = Math.hypot(
           event.point[0] - state.nearGround[0],
           event.point[2] - state.nearGround[2]

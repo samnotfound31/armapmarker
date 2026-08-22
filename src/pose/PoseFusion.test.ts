@@ -6,6 +6,7 @@ import type {
   TrackingQuality
 } from "../domain/types";
 import { buildApproximateIntrinsics } from "../geometry/intrinsics";
+import { applyMat3ToPixel } from "../geometry/displayTransform";
 import { IDENTITY_MAT3, IDENTITY_MAT4 } from "../test/geometryFixtures";
 import { PoseFusion } from "./PoseFusion";
 
@@ -83,7 +84,40 @@ describe("PoseFusion", () => {
     expect(stale).toEqual(IDENTITY_MAT3);
   });
 
-  it("bounds heading correction and rejects out-of-order updates", () => {
+  it("preserves scale, shear, and projective terms while weighting a weak correction", () => {
+    const projective: Mat3 = [
+      1.02, 0.01, 0.0001,
+      0.02, 0.98, -0.00005,
+      12, -8, 1
+    ];
+    const fusion = new PoseFusion(testCalibration(), {
+      maxFreshVisualAgeMs: 250,
+      visualFadeDurationMs: 500,
+      weakVisualWeight: 0.45,
+      maxVisualDisplacementPx: 120,
+      maxVisualConditionNumber: 20
+    });
+    fusion.updateVisual({
+      timestampMs: 1000,
+      keyframeId: 1,
+      imageHomography: projective,
+      quality: WEAK_QUALITY
+    });
+
+    expect(fusion.snapshot(1000).visualCorrection.imageHomography).toEqual([
+      expect.closeTo(1.009),
+      expect.closeTo(0.0045),
+      expect.closeTo(0.000045),
+      expect.closeTo(0.009),
+      expect.closeTo(0.991),
+      expect.closeTo(-0.0000225),
+      expect.closeTo(5.4),
+      expect.closeTo(-3.6),
+      expect.closeTo(1)
+    ]);
+  });
+
+  it("bounds full-image correction and rejects out-of-order updates", () => {
     const fusion = new PoseFusion(testCalibration());
     const rotation = 0.5;
     const visual: Mat3 = [
@@ -109,7 +143,18 @@ describe("PoseFusion", () => {
     ).toBe(false);
 
     const matrix = fusion.snapshot(1000).visualCorrection.imageHomography;
-    expect(Math.atan2(matrix[1], matrix[0])).toBeCloseTo(0.12);
+    for (const point of [
+      { xPx: 0, yPx: 0 },
+      { xPx: 1280, yPx: 0 },
+      { xPx: 0, yPx: 720 },
+      { xPx: 1280, yPx: 720 },
+      { xPx: 640, yPx: 360 }
+    ]) {
+      const transformed = applyMat3ToPixel(matrix, point);
+      expect(Math.hypot(transformed.xPx - point.xPx, transformed.yPx - point.yPx))
+        .toBeLessThanOrEqual(80.001);
+    }
+    expect(Math.atan2(matrix[1], matrix[0])).toBeGreaterThan(0);
   });
 });
 

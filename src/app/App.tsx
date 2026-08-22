@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { RouteRenderBackendFactory } from "../ar/RouteRenderer";
-import { ArViewport } from "../components/ArViewport";
+import {
+  ArViewport,
+  type ArViewportFailure
+} from "../components/ArViewport";
 import { ArrivalScreen } from "../components/ArrivalScreen";
 import { CalibrationScreen } from "../components/CalibrationScreen";
 import { NavigationHud } from "../components/NavigationHud";
@@ -40,7 +43,8 @@ import {
 import { createBrowserNavigationAdapters } from "../session/browserAdapters";
 import {
   createBrowserCalibrationRuntime,
-  type BrowserCalibrationRuntime
+  type BrowserCalibrationRuntime,
+  type CameraImageDimensions
 } from "../session/browserCalibration";
 import { createSessionStore, type SessionStore } from "../session/sessionStore";
 
@@ -70,7 +74,10 @@ type AppProps = {
     video: HTMLVideoElement,
     signal: AbortSignal
   ) => Promise<ArAccessGrant>;
-  createCalibrationRuntime?: (grant: ArAccessGrant) => CalibrationRuntime;
+  createCalibrationRuntime?: (
+    grant: ArAccessGrant,
+    deliveredDimensions?: Readonly<CameraImageDimensions>
+  ) => CalibrationRuntime;
   createSession?: (input: AppNavigationSessionInput) => NavigationSessionLike;
   backendFactory?: RouteRenderBackendFactory;
   sessionStore?: SessionStore;
@@ -100,8 +107,8 @@ export function App({
   requestLocation = requestCurrentLocation,
   requestRoute = requestWalkingRoute,
   requestAccess = requestArAccess,
-  createCalibrationRuntime: calibrationFactory = ({ stream }) =>
-    createBrowserCalibrationRuntime(stream),
+  createCalibrationRuntime: calibrationFactory = ({ stream }, deliveredDimensions) =>
+    createBrowserCalibrationRuntime(stream, deliveredDimensions),
   createSession: sessionFactory = createDefaultSession,
   backendFactory,
   sessionStore: providedSessionStore
@@ -147,6 +154,9 @@ export function App({
   const stageRef = useRef(stage);
   const routeRef = useRef(route);
   const visibilityInvalidated = useRef(false);
+  const calibrationDimensions = useRef<CameraImageDimensions | undefined>(
+    undefined
+  );
   stageRef.current = stage;
   routeRef.current = route;
 
@@ -220,6 +230,7 @@ export function App({
     const current = activeArGrant.current;
     if (current) stopMediaStream(current.stream);
     activeArGrant.current = null;
+    calibrationDimensions.current = undefined;
     setGrant(undefined);
   };
 
@@ -255,6 +266,7 @@ export function App({
       return;
     }
     try {
+      calibrationDimensions.current = undefined;
       latestAcceptedFix.current = nextGrant.location;
       const nextPreparedRoute = prepareRoute(route, nextGrant.location);
       latestAcceptedProgressMeters.current =
@@ -303,16 +315,16 @@ export function App({
           snapshot.navigation.acceptedGpsProgressMeters;
         setRuntimeSnapshot(snapshot);
         if (!snapshot.navigation.offRoute) setDismissedOffRoute(false);
-        store.save({
-          route,
-          stage: "navigating",
-          displayedProgressMeters: snapshot.navigation.routeProgressMeters
-        });
       },
       onLocationAccepted: (fix, progressMeters) => {
         latestAcceptedFix.current = fix;
         originFixRef.current = fix;
         latestAcceptedProgressMeters.current = progressMeters;
+        store.save({
+          route,
+          stage: "navigating",
+          displayedProgressMeters: progressMeters
+        });
       },
       onUnavailable: handleUnavailable,
       onArrived: (snapshot) => {
@@ -337,8 +349,9 @@ export function App({
     });
   };
 
-  const realign = () => {
+  const beginRealignment = (dimensions?: Readonly<CameraImageDimensions>) => {
     if (!grant || !route) return;
+    if (dimensions) calibrationDimensions.current = { ...dimensions };
     releaseSession();
     setRuntimeSnapshot(undefined);
     setCalibration(undefined);
@@ -347,7 +360,7 @@ export function App({
         route,
         latestAcceptedFix.current ?? grant.location
       );
-      const runtime = calibrationFactory(grant);
+      const runtime = calibrationFactory(grant, calibrationDimensions.current);
       activeCalibrationRuntime.current = runtime;
       setPreparedRoute(nextPreparedRoute);
       setCalibrationRuntime(runtime);
@@ -363,6 +376,8 @@ export function App({
       );
     }
   };
+
+  const realign = () => beginRealignment();
 
   const recalculateRoute = () => {
     if (!route) return;
@@ -467,7 +482,10 @@ export function App({
           currentRoute,
           latestAcceptedFix.current ?? currentGrant.location
         );
-        const runtime = calibrationFactory(currentGrant);
+        const runtime = calibrationFactory(
+          currentGrant,
+          calibrationDimensions.current
+        );
         activeCalibrationRuntime.current = runtime;
         setPreparedRoute(nextPreparedRoute);
         setCalibrationRuntime(runtime);
@@ -516,6 +534,19 @@ export function App({
     setStage("search");
   };
 
+  const handleViewportFailure = (failure: ArViewportFailure) => {
+    if (failure.kind === "video-dimensions") {
+      beginRealignment({
+        imageWidthPx: failure.imageWidthPx,
+        imageHeightPx: failure.imageHeightPx
+      });
+      return;
+    }
+    returnToPreview(
+      `${failure.message} AR overlay stopped; the route preview is still available.`
+    );
+  };
+
   if (
     stage === "navigating" &&
     route &&
@@ -535,6 +566,7 @@ export function App({
           route={preparedRoute.groundRoute}
           calibration={calibration}
           pose={runtimeSnapshot.pose}
+          onFailure={handleViewportFailure}
           {...(backendFactory ? { backendFactory } : {})}
         />
         <NavigationHud

@@ -77,6 +77,7 @@ describe("ArViewport", () => {
   });
 
   it("shows a compatibility message when WebGL creation fails", () => {
+    const onFailure = vi.fn();
     render(
       <ArViewport
         stream={{ getTracks: () => [] } as unknown as MediaStream}
@@ -86,12 +87,134 @@ describe("ArViewport", () => {
         backendFactory={() => {
           throw new Error("WebGL context unavailable");
         }}
+        onFailure={onFailure}
       />
     );
 
     expect(screen.getByRole("alert")).toHaveTextContent(/webgl.*unavailable/i);
+    expect(onFailure).toHaveBeenCalledOnce();
+    expect(onFailure).toHaveBeenCalledWith({
+      kind: "renderer",
+      message: "WebGL context unavailable"
+    });
+  });
+
+  it("reports WebGL context loss once even when the browser repeats the event", () => {
+    const onFailure = vi.fn();
+    const { container } = render(
+      <ArViewport
+        stream={{ getTracks: () => [] } as unknown as MediaStream}
+        route={route()}
+        calibration={calibration()}
+        pose={pose()}
+        backendFactory={() => new FakeRenderer()}
+        onFailure={onFailure}
+      />
+    );
+    const canvas = container.querySelector("canvas")!;
+    const firstLoss = new Event("webglcontextlost", { cancelable: true });
+
+    act(() => {
+      canvas.dispatchEvent(firstLoss);
+      canvas.dispatchEvent(new Event("webglcontextlost", { cancelable: true }));
+    });
+
+    expect(firstLoss.defaultPrevented).toBe(true);
+    expect(onFailure).toHaveBeenCalledOnce();
+    expect(onFailure).toHaveBeenCalledWith({
+      kind: "context-lost",
+      message: "The WebGL context was lost."
+    });
+  });
+
+  it("ignores initial zero metadata and accepts delivered dimensions matching calibration", () => {
+    const onFailure = vi.fn();
+    const { container } = render(
+      <ArViewport
+        stream={{ getTracks: () => [] } as unknown as MediaStream}
+        route={route()}
+        calibration={calibration()}
+        pose={pose()}
+        backendFactory={() => new FakeRenderer()}
+        onFailure={onFailure}
+      />
+    );
+    const video = container.querySelector("video")!;
+
+    setVideoDimensions(video, 0, 0);
+    act(() => video.dispatchEvent(new Event("loadedmetadata")));
+    setVideoDimensions(video, 1280, 720);
+    act(() => video.dispatchEvent(new Event("loadedmetadata")));
+
+    expect(onFailure).not.toHaveBeenCalled();
+  });
+
+  it("reports a meaningful delivered-video mismatch once", () => {
+    const onFailure = vi.fn();
+    const { container } = render(
+      <ArViewport
+        stream={{ getTracks: () => [] } as unknown as MediaStream}
+        route={route()}
+        calibration={calibration()}
+        pose={pose()}
+        backendFactory={() => new FakeRenderer()}
+        onFailure={onFailure}
+      />
+    );
+    const video = container.querySelector("video")!;
+
+    setVideoDimensions(video, 1920, 1080);
+    act(() => {
+      video.dispatchEvent(new Event("loadedmetadata"));
+      video.dispatchEvent(new Event("loadedmetadata"));
+    });
+
+    expect(onFailure).toHaveBeenCalledOnce();
+    expect(onFailure).toHaveBeenCalledWith({
+      kind: "video-dimensions",
+      message: expect.stringMatching(/resolution changed.*re-align/i),
+      imageWidthPx: 1920,
+      imageHeightPx: 1080
+    });
+  });
+
+  it("keeps matching camera intrinsics valid when only the screen rotates", () => {
+    const onFailure = vi.fn();
+    const { container } = render(
+      <ArViewport
+        stream={{ getTracks: () => [] } as unknown as MediaStream}
+        route={route()}
+        calibration={calibration()}
+        pose={pose()}
+        backendFactory={() => new FakeRenderer()}
+        onFailure={onFailure}
+      />
+    );
+    const video = container.querySelector("video")!;
+    setVideoDimensions(video, 1280, 720);
+
+    act(() => {
+      video.dispatchEvent(new Event("loadedmetadata"));
+      resizeCallback?.(
+        [{ contentRect: { width: 844, height: 390 } } as ResizeObserverEntry],
+        {} as ResizeObserver
+      );
+    });
+
+    expect(onFailure).not.toHaveBeenCalled();
   });
 });
+
+function setVideoDimensions(
+  video: HTMLVideoElement,
+  widthPx: number,
+  heightPx: number
+): void {
+  Object.defineProperties(video, {
+    videoWidth: { configurable: true, value: widthPx },
+    videoHeight: { configurable: true, value: heightPx }
+  });
+}
 
 function route(): RouteGroundPoint[] {
   return [
