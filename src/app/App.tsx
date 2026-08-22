@@ -129,6 +129,7 @@ export function App({
   const [grant, setGrant] = useState<ArAccessGrant>();
   const [calibrationRuntime, setCalibrationRuntime] =
     useState<CalibrationRuntime>();
+  const [calibrationGeneration, setCalibrationGeneration] = useState(0);
   const [calibration, setCalibration] = useState<GroundCalibration>();
   const [runtimeSnapshot, setRuntimeSnapshot] =
     useState<NavigationRuntimeSnapshot>();
@@ -428,8 +429,14 @@ export function App({
 
   useEffect(() => {
     const suspend = () => {
-      if (stageRef.current !== "navigating") return;
+      if (
+        stageRef.current !== "calibration" &&
+        stageRef.current !== "navigating"
+      ) {
+        return;
+      }
       const currentRoute = routeRef.current;
+      stageRef.current = "paused";
       visibilityInvalidated.current = true;
       releaseSession();
       releaseCalibrationRuntime();
@@ -448,6 +455,7 @@ export function App({
       }
     };
     const resume = () => {
+      if (document.visibilityState !== "visible") return;
       if (!visibilityInvalidated.current) return;
       visibilityInvalidated.current = false;
       const currentGrant = activeArGrant.current;
@@ -463,6 +471,8 @@ export function App({
         activeCalibrationRuntime.current = runtime;
         setPreparedRoute(nextPreparedRoute);
         setCalibrationRuntime(runtime);
+        setCalibrationGeneration((generation) => generation + 1);
+        stageRef.current = "calibration";
         setStage("calibration");
       } catch (error) {
         releaseGrant();
@@ -471,6 +481,7 @@ export function App({
             ? error.message
             : "Re-alignment could not resume."
         );
+        stageRef.current = "preview";
         setStage("preview");
       }
     };
@@ -480,7 +491,7 @@ export function App({
     };
     const onOrientationChange = () => {
       suspend();
-      resume();
+      if (document.visibilityState === "visible") resume();
     };
     document.addEventListener("visibilitychange", onVisibilityChange);
     const orientation = globalThis.screen?.orientation;
@@ -563,6 +574,7 @@ export function App({
         </section>
       ) : stage === "calibration" && route && grant && preparedRoute && calibrationRuntime ? (
         <CalibrationScreen
+          key={calibrationGeneration}
           feed={calibrationRuntime.feed}
           screenPointToGround={calibrationRuntime.screenPointToGround}
           groundRoute={preparedRoute.groundRoute}

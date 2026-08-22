@@ -271,31 +271,108 @@ describe("App integrated AR walk", () => {
       await screen.findByRole("heading", { name: /align route to the road/i })
     ).toBeVisible();
   });
+
+  it("disposes calibration while hidden and requires a fresh road calibration", async () => {
+    const lifecycle = await setupRecoveryApp({ startAt: "calibration" });
+    await collectCalibrationEvidence();
+
+    setVisibility("hidden");
+
+    expect(lifecycle.calibrationRuntimes[0]?.dispose).toHaveBeenCalledOnce();
+    expect(lifecycle.track.enabled).toBe(false);
+    expect(screen.getByRole("heading", { name: /navigation paused/i })).toBeVisible();
+    expect(screen.queryByRole("button", { name: /lock route.*start ar/i })).not.toBeInTheDocument();
+
+    setVisibility("visible");
+
+    expect(lifecycle.createCalibrationRuntime).toHaveBeenCalledTimes(2);
+    expect(
+      await screen.findByRole("button", { name: /chest.*1\.4 m/i })
+    ).toBeVisible();
+    expect(screen.queryByRole("button", { name: /lock route.*start ar/i })).not.toBeInTheDocument();
+  });
+
+  it("invalidates calibration evidence when the physical screen orientation changes", async () => {
+    const orientation = installOrientation(90);
+    const lifecycle = await setupRecoveryApp({ startAt: "calibration" });
+    await collectCalibrationEvidence();
+
+    act(() => orientation.dispatchEvent(new Event("change")));
+
+    expect(lifecycle.calibrationRuntimes[0]?.dispose).toHaveBeenCalledOnce();
+    expect(lifecycle.createCalibrationRuntime).toHaveBeenCalledTimes(2);
+    expect(
+      await screen.findByRole("button", { name: /chest.*1\.4 m/i })
+    ).toBeVisible();
+    expect(screen.queryByRole("button", { name: /lock route.*start ar/i })).not.toBeInTheDocument();
+  });
+
+  it("does not recreate calibration or enable tracks for orientation changes while hidden", async () => {
+    const orientation = installOrientation(90);
+    const lifecycle = await setupRecoveryApp({ startAt: "calibration" });
+
+    setVisibility("hidden");
+    act(() => orientation.dispatchEvent(new Event("change")));
+
+    expect(lifecycle.createCalibrationRuntime).toHaveBeenCalledOnce();
+    expect(lifecycle.track.enabled).toBe(false);
+    expect(screen.getByRole("heading", { name: /navigation paused/i })).toBeVisible();
+  });
+
+  it("starts exactly one fresh calibration after becoming visible following hidden rotation", async () => {
+    const orientation = installOrientation(90);
+    const lifecycle = await setupRecoveryApp({ startAt: "calibration" });
+
+    setVisibility("hidden");
+    act(() => orientation.dispatchEvent(new Event("change")));
+    setVisibility("visible");
+    setVisibility("visible");
+
+    expect(lifecycle.createCalibrationRuntime).toHaveBeenCalledTimes(2);
+    expect(lifecycle.calibrationRuntimes).toHaveLength(2);
+    expect(lifecycle.calibrationRuntimes[0]?.dispose).toHaveBeenCalledOnce();
+    expect(lifecycle.calibrationRuntimes[1]?.dispose).not.toHaveBeenCalled();
+    expect(lifecycle.sessionInputs).toHaveLength(0);
+    expect(lifecycle.track.enabled).toBe(true);
+    expect(await screen.findByRole("heading", { name: /align route to the road/i })).toBeVisible();
+  });
 });
 
 async function reachNavigation(): Promise<void> {
+  await reachCalibration();
+  await completeCalibration();
+  await screen.findByLabelText(/augmented reality navigation view/i);
+}
+
+async function reachCalibration(): Promise<void> {
   fireEvent.click(screen.getByRole("button", { name: /use my location/i }));
   await screen.findByText(/location ready/i);
   fireEvent.click(await screen.findByRole("button", { name: /choose city museum/i }));
   fireEvent.click(await screen.findByRole("button", { name: /start ar walk/i }));
   fireEvent.click(screen.getByRole("button", { name: /enable camera and sensors/i }));
   await screen.findByRole("heading", { name: /align route to the road/i });
-  await completeCalibration();
-  await screen.findByLabelText(/augmented reality navigation view/i);
 }
 
 async function completeCalibration(): Promise<void> {
+  await collectCalibrationEvidence();
+  fireEvent.click(await screen.findByRole("button", { name: /lock route.*start ar/i }));
+}
+
+async function collectCalibrationEvidence(): Promise<void> {
   fireEvent.click(screen.getByRole("button", { name: /chest.*1\.4 m/i }));
   fireEvent.click(screen.getByRole("button", { name: /capture standing pose/i }));
   const roadView = await screen.findByRole("button", { name: /road calibration view/i });
   fireEvent.pointerDown(roadView, { clientX: 100, clientY: 100 });
   fireEvent.pointerDown(roadView, { clientX: 100, clientY: 300 });
   fireEvent.click(await screen.findByRole("button", { name: /scan road features/i }));
-  fireEvent.click(await screen.findByRole("button", { name: /lock route.*start ar/i }));
+  await screen.findByRole("button", { name: /lock route.*start ar/i });
 }
 
 async function setupRecoveryApp(
-  options: { failRecalculation?: boolean } = {}
+  options: {
+    failRecalculation?: boolean;
+    startAt?: "calibration" | "navigating";
+  } = {}
 ) {
   const track = { stop: vi.fn(), enabled: true };
   const stream = {
@@ -334,6 +411,12 @@ async function setupRecoveryApp(
   });
   const sessionInputs: AppNavigationSessionInput[] = [];
   const sessionStops: ReturnType<typeof vi.fn>[] = [];
+  const calibrationRuntimes: CalibrationRuntime[] = [];
+  const createCalibrationRuntime = vi.fn(() => {
+    const runtime = calibrationRuntime();
+    calibrationRuntimes.push(runtime);
+    return runtime;
+  });
 
   render(
     <App
@@ -342,7 +425,7 @@ async function setupRecoveryApp(
       requestLocation={requestLocation}
       requestRoute={requestRoute}
       requestAccess={vi.fn(async () => ({ stream, location: initialFix }))}
-      createCalibrationRuntime={() => calibrationRuntime()}
+      createCalibrationRuntime={createCalibrationRuntime}
       createSession={(input) => {
         sessionInputs.push(input);
         const stop = vi.fn();
@@ -352,14 +435,36 @@ async function setupRecoveryApp(
       backendFactory={() => new FakeRenderer()}
     />
   );
-  await reachNavigation();
+  if (options.startAt === "calibration") await reachCalibration();
+  else await reachNavigation();
   return {
+    track,
     freshFix,
     requestLocation,
     requestRoute,
+    createCalibrationRuntime,
+    calibrationRuntimes,
     sessionInputs,
     sessionStops
   };
+}
+
+function setVisibility(state: DocumentVisibilityState): void {
+  Object.defineProperty(document, "visibilityState", {
+    configurable: true,
+    value: state
+  });
+  fireEvent(document, new Event("visibilitychange"));
+}
+
+function installOrientation(angle: number): EventTarget {
+  const orientation = new EventTarget();
+  Object.defineProperty(orientation, "angle", { value: angle });
+  Object.defineProperty(globalThis.screen, "orientation", {
+    configurable: true,
+    value: orientation
+  });
+  return orientation;
 }
 
 function destinationAdapter(): DestinationSearchAdapter {
