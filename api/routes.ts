@@ -1,46 +1,61 @@
+import polylineCodec from "@googlemaps/polyline-codec";
 import { z } from "zod";
 import {
   routeApiResponseSchema,
   routeRequestSchema,
   type RouteRequestInput
 } from "../src/google/routeSchemas";
+import { createHeiGitHeaders, HEIGIT_ENDPOINTS } from "./providers/heigitConfig";
+import {
+  createUpstreamRequestSignal,
+  safeRetryAfter
+} from "./providers/upstreamRequest";
+import {
+  createClientRateLimiter,
+  trustedClientId,
+  type ClientRateLimiter
+} from "./requestPolicy";
+
+export { createClientRateLimiter } from "./requestPolicy";
 
 const MAX_BODY_BYTES = 8 * 1024;
-const GOOGLE_ROUTES_URL =
-  "https://routes.googleapis.com/directions/v2:computeRoutes";
-
-export const ROUTES_FIELD_MASK = [
-  "routes.duration",
-  "routes.distanceMeters",
-  "routes.polyline.encodedPolyline",
-  "routes.legs.steps.distanceMeters",
-  "routes.legs.steps.polyline.encodedPolyline",
-  "routes.legs.steps.navigationInstruction"
-].join(",");
-
-const googleResponseSchema = z.object({
-  routes: z
+const longitudeSchema = z.number().finite().min(-180).max(180);
+const latitudeSchema = z.number().finite().min(-90).max(90);
+const coordinateSchema = z.tuple([longitudeSchema, latitudeSchema]);
+const orsStepSchema = z.object({
+  distance: z.number().finite().nonnegative(),
+  duration: z.number().finite().nonnegative(),
+  type: z.number().int().nonnegative(),
+  instruction: z.string().trim().min(1),
+  name: z.string(),
+  way_points: z.tuple([
+    z.number().int().nonnegative(),
+    z.number().int().nonnegative()
+  ])
+});
+const orsResponseSchema = z.object({
+  type: z.literal("FeatureCollection"),
+  features: z
     .array(
       z.object({
-        duration: z.string().regex(/^\d+(?:\.\d+)?s$/),
-        distanceMeters: z.number().nonnegative(),
-        polyline: z.object({ encodedPolyline: z.string().min(1) }),
-        legs: z.array(
-          z.object({
-            steps: z.array(
-              z.object({
-                distanceMeters: z.number().nonnegative(),
-                polyline: z.object({ encodedPolyline: z.string().min(1) }),
-                navigationInstruction: z
-                  .object({
-                    maneuver: z.string().optional(),
-                    instructions: z.string().optional()
-                  })
-                  .optional()
-              })
-            )
-          })
-        )
+        type: z.literal("Feature"),
+        properties: z.object({
+          summary: z.object({
+            distance: z.number().finite().nonnegative(),
+            duration: z.number().finite().nonnegative()
+          }),
+          segments: z.array(
+            z.object({
+              distance: z.number().finite().nonnegative(),
+              duration: z.number().finite().nonnegative(),
+              steps: z.array(orsStepSchema)
+            })
+          )
+        }),
+        geometry: z.object({
+          type: z.literal("LineString"),
+          coordinates: z.array(coordinateSchema).min(2)
+        })
       })
     )
     .min(1)
@@ -58,87 +73,38 @@ type HandlerDependencies = {
   rateLimiter?: ClientRateLimiter;
 };
 
-export type ClientRateLimiter = {
-  check(
-    clientId: string,
-    nowMs: number
-  ): { allowed: boolean; retryAfterSeconds: number };
-};
-
-type RateLimiterConfig = {
-  limit: number;
-  windowMs: number;
-  maxClients: number;
-};
-
-const DEFAULT_RATE_LIMIT: Readonly<RateLimiterConfig> = {
-  limit: 20,
-  windowMs: 60_000,
-  maxClients: 10_000
-};
-
 const defaultRateLimiter = createClientRateLimiter();
 
-export function createClientRateLimiter(
-  config: Readonly<RateLimiterConfig> = DEFAULT_RATE_LIMIT
-): ClientRateLimiter {
-  if (config.limit < 1 || config.windowMs < 1 || config.maxClients < 1) {
-    throw new RangeError("Rate-limit configuration must be positive.");
-  }
-  const clients = new Map<string, { windowStartedAtMs: number; count: number }>();
+export function buildHeiGitRouteRequest(input: RouteRequestInput) {
   return {
-    check(clientId, nowMs) {
-      for (const [id, entry] of clients) {
-        if (nowMs - entry.windowStartedAtMs >= config.windowMs) {
-          clients.delete(id);
-        }
-      }
-      let entry = clients.get(clientId);
-      if (!entry) {
-        while (clients.size >= config.maxClients) {
-          const oldest = clients.keys().next().value as string | undefined;
-          if (!oldest) break;
-          clients.delete(oldest);
-        }
-        entry = { windowStartedAtMs: nowMs, count: 0 };
-        clients.set(clientId, entry);
-      }
-      entry.count += 1;
-      const retryAfterSeconds = Math.max(
-        1,
-        Math.ceil(
-          (entry.windowStartedAtMs + config.windowMs - nowMs) / 1000
-        )
-      );
-      return {
-        allowed: entry.count <= config.limit,
-        retryAfterSeconds
-      };
-    }
-  };
+    coordinates: [
+      [input.origin.lng, input.origin.lat],
+      [input.destination.lng, input.destination.lat]
+    ],
+    instructions: true,
+    language: "en"
+  } as const;
 }
 
-export function buildGoogleRequest(input: RouteRequestInput) {
-  return {
-    origin: {
-      location: {
-        latLng: {
-          latitude: input.origin.lat,
-          longitude: input.origin.lng
-        }
-      }
-    },
-    destination: {
-      location: {
-        latLng: {
-          latitude: input.destination.lat,
-          longitude: input.destination.lng
-        }
-      }
-    },
-    travelMode: "WALK",
-    polylineQuality: "HIGH_QUALITY"
-  } as const;
+const ORS_MANEUVERS: Readonly<Record<number, string>> = {
+  0: "TURN_LEFT",
+  1: "TURN_RIGHT",
+  2: "TURN_SHARP_LEFT",
+  3: "TURN_SHARP_RIGHT",
+  4: "TURN_SLIGHT_LEFT",
+  5: "TURN_SLIGHT_RIGHT",
+  6: "STRAIGHT",
+  7: "ROUNDABOUT_ENTER",
+  8: "ROUNDABOUT_EXIT",
+  9: "UTURN",
+  10: "ARRIVE",
+  11: "DEPART",
+  12: "KEEP_LEFT",
+  13: "KEEP_RIGHT"
+};
+
+export function mapOrsManeuver(type: number): string {
+  return ORS_MANEUVERS[type] ?? "STRAIGHT";
 }
 
 export async function handleRouteRequest(
@@ -248,82 +214,130 @@ export async function handleRouteRequest(
     );
   }
 
-  let googleResponse: Response;
+  const upstream = createUpstreamRequestSignal(request.signal);
   try {
-    googleResponse = await dependencies.fetch(GOOGLE_ROUTES_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Goog-Api-Key": dependencies.apiKey,
-        "X-Goog-FieldMask": ROUTES_FIELD_MASK
-      },
-      body: JSON.stringify(buildGoogleRequest(input)),
-      signal: request.signal
-    });
-  } catch {
-    return respond(
-      { code: "ROUTES_UNAVAILABLE", message: "Google Routes is unavailable." },
-      503,
-      "network"
-    );
+    let providerResponse: Response;
+    try {
+      providerResponse = await dependencies.fetch(HEIGIT_ENDPOINTS.walkingDirections, {
+        method: "POST",
+        headers: {
+          ...createHeiGitHeaders(dependencies.apiKey),
+          Accept: "application/geo+json",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(buildHeiGitRouteRequest(input)),
+        signal: upstream.signal
+      });
+    } catch {
+      return respond(
+        {
+          code: "ROUTES_UNAVAILABLE",
+          message: "The walking route service is unavailable."
+        },
+        503,
+        "network"
+      );
+    }
+
+    if (providerResponse.status === 429) {
+      const retryAfter = safeRetryAfter(providerResponse);
+      return respond(
+        {
+          code: "ROUTES_RATE_LIMITED",
+          message: "The walking route service is busy. Try again shortly."
+        },
+        429,
+        "upstream_rate_limit",
+        retryAfter ? { "Retry-After": retryAfter } : {}
+      );
+    }
+    if (!providerResponse.ok) {
+      const unavailable = providerResponse.status >= 500;
+      return respond(
+        {
+          code: unavailable ? "ROUTES_UNAVAILABLE" : "ROUTES_UPSTREAM",
+          message: unavailable
+            ? "The walking route service is unavailable."
+            : "The walking route service could not calculate this walk."
+        },
+        unavailable ? 503 : 502,
+        "upstream"
+      );
+    }
+
+    let providerPayload: unknown;
+    try {
+      providerPayload = await providerResponse.json();
+    } catch {
+      providerPayload = null;
+    }
+    const parsed = orsResponseSchema.safeParse(providerPayload);
+    if (!parsed.success) {
+      return respond(
+        {
+          code: "ROUTES_RESPONSE",
+          message: "The walking route provider returned an invalid route."
+        },
+        502,
+        "response"
+      );
+    }
+
+    const route = parsed.data.features[0]!;
+    const coordinates = route.geometry.coordinates;
+    let normalized;
+    try {
+      normalized = routeApiResponseSchema.parse({
+        origin: input.origin,
+        destination: {
+          lat: input.destination.lat,
+          lng: input.destination.lng
+        },
+        encodedPolyline: encodeCoordinates(coordinates),
+        distanceMeters: route.properties.summary.distance,
+        durationSeconds: Math.round(route.properties.summary.duration),
+        steps: route.properties.segments.flatMap((segment) =>
+          segment.steps.map((step) => {
+            const [start, end] = step.way_points;
+            if (start > end || end >= coordinates.length) {
+              throw new RangeError("ORS step geometry is outside the route.");
+            }
+            return {
+              instruction: step.instruction,
+              maneuver: mapOrsManeuver(step.type),
+              distanceMeters: step.distance,
+              polyline: encodeCoordinates(coordinates.slice(start, end + 1))
+            };
+          })
+        )
+      });
+    } catch {
+      return respond(
+        {
+          code: "ROUTES_RESPONSE",
+          message: "The walking route provider returned an invalid route."
+        },
+        502,
+        "response"
+      );
+    }
+
+    return respond(normalized, 200, "success");
+  } finally {
+    upstream.dispose();
   }
-
-  if (!googleResponse.ok) {
-    return respond(
-      {
-        code: "ROUTES_UPSTREAM",
-        message: "Google Routes could not calculate this walk."
-      },
-      502,
-      "upstream"
-    );
-  }
-
-  const parsed = googleResponseSchema.safeParse(await googleResponse.json());
-  if (!parsed.success) {
-    return respond(
-      { code: "ROUTES_RESPONSE", message: "Google Routes returned an invalid route." },
-      502,
-      "response"
-    );
-  }
-
-  const route = parsed.data.routes[0]!;
-  const normalized = routeApiResponseSchema.parse({
-    origin: input.origin,
-    destination: {
-      lat: input.destination.lat,
-      lng: input.destination.lng
-    },
-    encodedPolyline: route.polyline.encodedPolyline,
-    distanceMeters: route.distanceMeters,
-    durationSeconds: Math.round(Number.parseFloat(route.duration)),
-    steps: route.legs.flatMap((leg) =>
-      leg.steps.map((step) => ({
-        instruction: step.navigationInstruction?.instructions ?? "Continue",
-        maneuver: step.navigationInstruction?.maneuver ?? "STRAIGHT",
-        distanceMeters: step.distanceMeters,
-        polyline: step.polyline.encodedPolyline
-      }))
-    )
-  });
-
-  return respond(normalized, 200, "success");
 }
 
-function trustedClientId(request: Request): string | null {
-  const value =
-    request.headers.get("x-vercel-forwarded-for") ??
-    request.headers.get("x-real-ip");
-  if (!value || value.length > 64 || value.includes(",")) return null;
-  const normalized = value.trim();
-  return /^[0-9a-f:.]+$/i.test(normalized) ? normalized : null;
+function encodeCoordinates(
+  coordinates: readonly (readonly [number, number])[]
+): string {
+  return polylineCodec.encode(coordinates.map(([lng, lat]) => [lat, lng]));
 }
 
 export default {
   fetch(request: Request) {
     return handleRouteRequest(request, {
-      apiKey: process.env.GOOGLE_ROUTES_SERVER_KEY,
+      apiKey: process.env.OPENROUTESERVICE_API_KEY,
       fetch,
       log: (event) => console.info("route_request", event)
     });

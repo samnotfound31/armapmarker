@@ -1,16 +1,44 @@
-import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Destination } from "../domain/types";
 import type { DestinationSearchAdapter } from "../components/SearchScreen";
 import { App } from "./App";
 
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
 describe("App", () => {
-  it("starts with the walking safety and destination search screen", () => {
+  it("starts with the walking safety and destination search screen", async () => {
     render(<App />);
 
     expect(screen.getByRole("heading", { name: /walk with ar/i })).toBeVisible();
     expect(screen.getByText(/never use while driving/i)).toBeVisible();
-    expect(screen.getByLabelText(/destination/i)).toBeEnabled();
+    await waitFor(() =>
+      expect(
+        screen.getAllByRole("searchbox", { name: /destination/i })
+      ).toHaveLength(1)
+    );
+  });
+
+  it("uses the ORS search broker as the default destination provider", async () => {
+    const fetchSearch = vi.fn<typeof fetch>(async () =>
+      Response.json({ suggestions: [] })
+    );
+    vi.stubGlobal("fetch", fetchSearch);
+    render(<App />);
+
+    await waitFor(() =>
+      expect(
+        screen.getAllByRole("searchbox", { name: /destination/i })
+      ).toHaveLength(1)
+    );
+    fireEvent.input(screen.getByRole("searchbox", { name: /destination/i }), {
+      target: { value: "City Museum" }
+    });
+
+    await waitFor(() => expect(fetchSearch).toHaveBeenCalledOnce());
+    expect(fetchSearch.mock.calls[0]?.[0]).toBe("/api/search");
   });
 
   it("moves from an accurate origin and destination to route preview", async () => {

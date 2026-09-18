@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { RoutePlan } from "../domain/types";
 import {
   createGoogleRouteMapAdapter,
+  createRouteShapeMapAdapter,
   RoutePreview,
   type RouteMapAdapter
 } from "./RoutePreview";
@@ -18,6 +19,7 @@ const route: RoutePlan = {
 };
 
 const mapAdapter: RouteMapAdapter = {
+  attribution: "© openrouteservice.org by HeiGIT | Map data © OpenStreetMap contributors",
   mount: () => () => undefined
 };
 
@@ -60,7 +62,30 @@ describe("RoutePreview", () => {
     expect(setMap).toHaveBeenLastCalledWith(null);
   });
 
-  it("shows the walking summary and required Google attribution", () => {
+  it("renders a provider-neutral route shape without a map SDK", async () => {
+    const host = document.createElement("div");
+    const adapter = createRouteShapeMapAdapter();
+    const validRoute = {
+      ...route,
+      encodedPolyline: encode([
+        [22.57, 88.36],
+        [22.575, 88.365],
+        [22.58, 88.37]
+      ])
+    };
+
+    const dispose = await adapter.mount(host, validRoute);
+
+    expect(host.querySelector("svg")).not.toBeNull();
+    expect(host.querySelector("polyline")?.getAttribute("points")).toBe(
+      "12,188 100,100 188,12"
+    );
+    expect(host.querySelectorAll("circle")).toHaveLength(2);
+    dispose();
+    expect(host).toBeEmptyDOMElement();
+  });
+
+  it("shows the walking summary and provider attribution", () => {
     render(
       <RoutePreview
         route={route}
@@ -73,7 +98,8 @@ describe("RoutePreview", () => {
     expect(screen.getByRole("heading", { name: "City Museum" })).toBeVisible();
     expect(screen.getByText("1.2 km")).toBeVisible();
     expect(screen.getByText("16 min")).toBeVisible();
-    expect(screen.getByText(/powered by google/i)).toBeVisible();
+    expect(screen.getByText(/openrouteservice\.org by heigit/i)).toBeVisible();
+    expect(screen.getByText(/openstreetmap contributors/i)).toBeVisible();
   });
 
   it("offers back and AR-start actions", () => {

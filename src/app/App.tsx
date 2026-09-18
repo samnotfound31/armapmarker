@@ -10,12 +10,11 @@ import { NavigationHud } from "../components/NavigationHud";
 import { PermissionScreen } from "../components/PermissionScreen";
 import { UpdatePrompt } from "../components/UpdatePrompt";
 import {
-  createGoogleRouteMapAdapter,
+  createRouteShapeMapAdapter,
   RoutePreview,
   type RouteMapAdapter
 } from "../components/RoutePreview";
 import {
-  createGoogleDestinationSearchAdapter,
   SearchScreen,
   type DestinationSearchAdapter
 } from "../components/SearchScreen";
@@ -29,6 +28,7 @@ import { stopMediaStream } from "../device/camera";
 import { requestCurrentLocation, type LocationFix } from "../device/location";
 import { requestArAccess, type ArAccessGrant } from "../device/permissions";
 import { requestWalkingRoute, type WalkingRouteInput } from "../google/routeClient";
+import { createOrsDestinationSearchAdapter } from "../ors/destinationSearchAdapter";
 import { selectNextManeuver } from "../navigation/navigationEngine";
 import { PoseFusion } from "../pose/PoseFusion";
 import {
@@ -92,7 +92,6 @@ type AppStage =
   | "paused"
   | "arrived";
 
-const browserKey = import.meta.env.VITE_GOOGLE_MAPS_BROWSER_KEY ?? "";
 const INITIAL_QUALITY: TrackingQuality = {
   state: "weak",
   featureCount: 0,
@@ -116,11 +115,11 @@ export function App({
   const destinationAdapter = useMemo(
     () =>
       providedDestinationAdapter ??
-      createGoogleDestinationSearchAdapter(browserKey),
+      createOrsDestinationSearchAdapter(),
     [providedDestinationAdapter]
   );
   const mapAdapter = useMemo(
-    () => providedMapAdapter ?? createGoogleRouteMapAdapter(browserKey),
+    () => providedMapAdapter ?? createRouteShapeMapAdapter(),
     [providedMapAdapter]
   );
   const store = useMemo(

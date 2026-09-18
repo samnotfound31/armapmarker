@@ -8,6 +8,7 @@ import {
 
 export type DestinationSearchCallbacks = {
   origin?: GeoPoint;
+  getOrigin?: () => GeoPoint | undefined;
   onSelect: (destination: Destination) => void;
   onError: (message: string) => void;
 };
@@ -127,6 +128,7 @@ export function SearchScreen({
     Promise.resolve(
       destinationAdapter.mount(host, {
         origin: originRef.current,
+        getOrigin: () => originRef.current,
         onSelect: (destination) => onDestinationRef.current(destination),
         onError: setDestinationError
       })

@@ -7,6 +7,7 @@ import {
 } from "../google/mapsLoader";
 
 export type RouteMapAdapter = {
+  attribution?: string;
   mount(
     host: HTMLElement,
     route: RoutePlan
@@ -27,6 +28,7 @@ export function createGoogleRouteMapAdapter(
   loadLibraries: GoogleLibrariesLoader = loadGoogleLibraries
 ): RouteMapAdapter {
   return {
+    attribution: `Powered by Google, ©${new Date().getFullYear()} Google`,
     async mount(host, route) {
       const { maps } = await loadLibraries(apiKey);
       const path = decode(route.encodedPolyline).map(([lat, lng]) => ({
@@ -68,6 +70,44 @@ export function createGoogleRouteMapAdapter(
         polyline.setMap(null);
         host.replaceChildren();
       };
+    }
+  };
+}
+
+export function createRouteShapeMapAdapter(): RouteMapAdapter {
+  return {
+    attribution:
+      "© openrouteservice.org by HeiGIT | Map data © OpenStreetMap contributors",
+    mount(host, route) {
+      const path = decode(route.encodedPolyline);
+      if (path.length < 2) {
+        throw new Error("The route preview has too few points.");
+      }
+      const points = fitRouteShape(path);
+      const namespace = "http://www.w3.org/2000/svg";
+      const svg = document.createElementNS(namespace, "svg");
+      svg.setAttribute("viewBox", "0 0 200 200");
+      svg.setAttribute("role", "img");
+      svg.setAttribute("aria-label", "Route shape from current location to destination");
+      const line = document.createElementNS(namespace, "polyline");
+      line.setAttribute(
+        "points",
+        points.map(([x, y]) => `${x},${y}`).join(" ")
+      );
+      line.setAttribute("fill", "none");
+      line.setAttribute("stroke", "#20e878");
+      line.setAttribute("stroke-width", "7");
+      line.setAttribute("stroke-linecap", "round");
+      line.setAttribute("stroke-linejoin", "round");
+      const start = createEndpoint(namespace, points[0]!, "#f5fff8");
+      const destination = createEndpoint(
+        namespace,
+        points.at(-1)!,
+        "#20e878"
+      );
+      svg.append(line, start, destination);
+      host.replaceChildren(svg);
+      return () => host.replaceChildren();
     }
   };
 }
@@ -116,9 +156,9 @@ export function RoutePreview({
 
       <div ref={mapHost} className="route-map" aria-label="Walking route map" />
       {mapError && <p role="alert">{mapError}</p>}
-      <p className="google-attribution">
-        Powered by Google, ©{new Date().getFullYear()} Google
-      </p>
+      {mapAdapter.attribution && (
+        <p className="provider-attribution">{mapAdapter.attribution}</p>
+      )}
 
       <dl className="route-summary">
         <div>
@@ -136,6 +176,45 @@ export function RoutePreview({
       </button>
     </section>
   );
+}
+
+function fitRouteShape(
+  path: readonly (readonly [number, number])[]
+): [number, number][] {
+  const latitudes = path.map(([lat]) => lat);
+  const longitudes = path.map(([, lng]) => lng);
+  const minLat = Math.min(...latitudes);
+  const maxLat = Math.max(...latitudes);
+  const minLng = Math.min(...longitudes);
+  const maxLng = Math.max(...longitudes);
+  const midLat = (minLat + maxLat) / 2;
+  const midLng = (minLng + maxLng) / 2;
+  const spanLat = Math.max(maxLat - minLat, 1e-9);
+  const spanLng = Math.max(maxLng - minLng, 1e-9);
+  const scale = Math.min(176 / spanLng, 176 / spanLat);
+  return path.map(([lat, lng]) => [
+    roundShapeCoordinate(100 + (lng - midLng) * scale),
+    roundShapeCoordinate(100 - (lat - midLat) * scale)
+  ]);
+}
+
+function createEndpoint(
+  namespace: string,
+  [cx, cy]: readonly [number, number],
+  fill: string
+): Element {
+  const circle = document.createElementNS(namespace, "circle");
+  circle.setAttribute("cx", String(cx));
+  circle.setAttribute("cy", String(cy));
+  circle.setAttribute("r", "7");
+  circle.setAttribute("fill", fill);
+  circle.setAttribute("stroke", "#07140d");
+  circle.setAttribute("stroke-width", "3");
+  return circle;
+}
+
+function roundShapeCoordinate(value: number): number {
+  return Math.round(value * 1_000) / 1_000;
 }
 
 function formatDistance(distanceMeters: number): string {

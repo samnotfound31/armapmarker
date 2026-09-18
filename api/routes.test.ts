@@ -1,81 +1,153 @@
 // @vitest-environment node
 
 import { describe, expect, it, vi } from "vitest";
+import { spawnSync } from "node:child_process";
 import {
-  ROUTES_FIELD_MASK,
-  buildGoogleRequest,
+  buildHeiGitRouteRequest,
   createClientRateLimiter,
-  handleRouteRequest
+  handleRouteRequest,
+  mapOrsManeuver
 } from "./routes";
 
 const input = {
   origin: { lat: 22.5726, lng: 88.3639 },
   destination: {
-    placeId: "destination-id",
+    placeId: "openstreetmap:venue:destination-id",
     lat: 22.5826,
     lng: 88.3739
   }
 };
 
-const googleResponse = {
-  routes: [
+const orsResponse = {
+  type: "FeatureCollection",
+  bbox: [88.3639, 22.5726, 88.3739, 22.5826],
+  features: [
     {
-      duration: "932s",
-      distanceMeters: 1200,
-      polyline: { encodedPolyline: "encoded-route" },
-      legs: [
-        {
-          steps: [
-            {
-              distanceMeters: 200,
-              polyline: { encodedPolyline: "encoded-step" },
-              navigationInstruction: {
-                maneuver: "TURN_LEFT",
-                instructions: "Turn left"
+      type: "Feature",
+      bbox: [88.3639, 22.5726, 88.3739, 22.5826],
+      properties: {
+        summary: { distance: 1200, duration: 932.4 },
+        segments: [
+          {
+            distance: 1200,
+            duration: 932.4,
+            steps: [
+              {
+                distance: 600,
+                duration: 470,
+                type: 6,
+                instruction: "Continue straight",
+                name: "Museum Road",
+                way_points: [0, 1]
+              },
+              {
+                distance: 600,
+                duration: 462.4,
+                type: 0,
+                instruction: "Turn left onto Gallery Street",
+                name: "Gallery Street",
+                way_points: [1, 2]
               }
-            }
-          ]
-        }
-      ]
+            ]
+          }
+        ],
+        way_points: [0, 2]
+      },
+      geometry: {
+        type: "LineString",
+        coordinates: [
+          [88.3639, 22.5726],
+          [88.3689, 22.5776],
+          [88.3739, 22.5826]
+        ]
+      }
     }
-  ]
+  ],
+  metadata: {
+    attribution: "openrouteservice.org | OpenStreetMap contributors",
+    service: "routing",
+    timestamp: 1
+  }
 };
 
-describe("buildGoogleRequest", () => {
-  it("maps app coordinates to Google latitude/longitude walking waypoints", () => {
-    expect(buildGoogleRequest(input)).toEqual({
-      origin: {
-        location: {
-          latLng: { latitude: 22.5726, longitude: 88.3639 }
-        }
-      },
-      destination: {
-        location: {
-          latLng: { latitude: 22.5826, longitude: 88.3739 }
-        }
-      },
-      travelMode: "WALK",
-      polylineQuality: "HIGH_QUALITY"
+describe("buildHeiGitRouteRequest", () => {
+  it("maps app coordinates to ORS longitude/latitude walking input", () => {
+    expect(buildHeiGitRouteRequest(input)).toEqual({
+      coordinates: [
+        [88.3639, 22.5726],
+        [88.3739, 22.5826]
+      ],
+      instructions: true,
+      language: "en"
     });
   });
+});
 
-  it("requests only the fields needed by navigation", () => {
-    expect(ROUTES_FIELD_MASK).toBe(
-      "routes.duration,routes.distanceMeters,routes.polyline.encodedPolyline," +
-        "routes.legs.steps.distanceMeters,routes.legs.steps.polyline.encodedPolyline," +
-        "routes.legs.steps.navigationInstruction"
-    );
+describe("mapOrsManeuver", () => {
+  it.each([
+    [0, "TURN_LEFT"],
+    [1, "TURN_RIGHT"],
+    [2, "TURN_SHARP_LEFT"],
+    [3, "TURN_SHARP_RIGHT"],
+    [4, "TURN_SLIGHT_LEFT"],
+    [5, "TURN_SLIGHT_RIGHT"],
+    [6, "STRAIGHT"],
+    [7, "ROUNDABOUT_ENTER"],
+    [8, "ROUNDABOUT_EXIT"],
+    [9, "UTURN"],
+    [10, "ARRIVE"],
+    [11, "DEPART"],
+    [12, "KEEP_LEFT"],
+    [13, "KEEP_RIGHT"],
+    [99, "STRAIGHT"]
+  ])("maps ORS instruction type %i to %s", (type, expected) => {
+    expect(mapOrsManeuver(type)).toBe(expected);
   });
 });
 
 describe("handleRouteRequest", () => {
-  it("returns a normalized walking route without exposing the server key", async () => {
-    const fetchGoogle = vi.fn<typeof fetch>(async () =>
-      Response.json(googleResponse, { status: 200 })
+  it("normalizes route geometry under native Node module loading", () => {
+    const result = spawnSync(process.execPath, ["--input-type=module", "--eval", `
+      import { registerHooks } from "node:module";
+      import { readFileSync } from "node:fs";
+      import { extname } from "node:path";
+      // Resolve the adapter's extensionless TS imports without bundling packages.
+      registerHooks({ resolve(specifier, context, nextResolve) {
+        return nextResolve(specifier.startsWith(".") && !extname(specifier)
+          ? specifier + ".ts" : specifier, context);
+      } });
+      const { handleRouteRequest } = await import("./api/routes.ts");
+      const { input, provider } = JSON.parse(readFileSync(0, "utf8"));
+      const response = await handleRouteRequest(new Request("https://app.example/api/routes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-vercel-forwarded-for": "203.0.113.10" },
+        body: JSON.stringify(input)
+      }), { apiKey: "test-secret", fetch: async () => Response.json(provider), log: () => {} });
+      console.log(JSON.stringify({ status: response.status, payload: await response.json() }));
+    `], { input: JSON.stringify({ input, provider: orsResponse }), encoding: "utf8" });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      status: 200,
+      payload: {
+        encodedPolyline: "wuwhCkqizOg^g^g^g^",
+        distanceMeters: 1200,
+        durationSeconds: 932,
+        steps: [
+          { maneuver: "STRAIGHT", polyline: "wuwhCkqizOg^g^" },
+          { maneuver: "TURN_LEFT", polyline: "_uxhCspjzOg^g^" }
+        ]
+      }
+    });
+  });
+
+  it("normalizes ORS GeoJSON into the existing RoutePlan boundary", async () => {
+    const fetchHeiGit = vi.fn<typeof fetch>(async () =>
+      Response.json(orsResponse, { status: 200 })
     );
     const response = await handleRouteRequest(createRequest(input), {
       apiKey: "server-secret",
-      fetch: fetchGoogle,
+      fetch: fetchHeiGit,
       log: vi.fn()
     });
 
@@ -84,80 +156,131 @@ describe("handleRouteRequest", () => {
     expect(payload).toEqual({
       origin: input.origin,
       destination: { lat: 22.5826, lng: 88.3739 },
-      encodedPolyline: "encoded-route",
+      encodedPolyline: "wuwhCkqizOg^g^g^g^",
       distanceMeters: 1200,
       durationSeconds: 932,
       steps: [
         {
-          instruction: "Turn left",
+          instruction: "Continue straight",
+          maneuver: "STRAIGHT",
+          distanceMeters: 600,
+          polyline: "wuwhCkqizOg^g^"
+        },
+        {
+          instruction: "Turn left onto Gallery Street",
           maneuver: "TURN_LEFT",
-          distanceMeters: 200,
-          polyline: "encoded-step"
+          distanceMeters: 600,
+          polyline: "_uxhCspjzOg^g^"
         }
       ]
     });
-    expect(fetchGoogle.mock.calls[0]?.[1]?.headers).toEqual(
+    expect(fetchHeiGit).toHaveBeenCalledWith(
+      "https://api.heigit.org/openrouteservice/v2/directions/foot-walking/geojson",
       expect.objectContaining({
-        "X-Goog-Api-Key": "server-secret",
-        "X-Goog-FieldMask": ROUTES_FIELD_MASK
+        method: "POST",
+        headers: {
+          Accept: "application/geo+json",
+          Authorization: "server-secret",
+          "Content-Type": "application/json"
+        }
       })
     );
     expect(JSON.stringify(payload)).not.toContain("server-secret");
   });
 
-  it("rejects invalid and oversized bodies before contacting Google", async () => {
-    const fetchGoogle = vi.fn();
-    const invalid = await handleRouteRequest(
-      createRequest({ ...input, origin: { lat: 500, lng: 88 } }),
-      { apiKey: "secret", fetch: fetchGoogle, log: vi.fn() }
-    );
-    const oversized = await handleRouteRequest(
-      new Request("https://app.example/api/routes", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Origin: "https://app.example",
-          "x-vercel-forwarded-for": "203.0.113.10"
-        },
-        body: JSON.stringify({ padding: "x".repeat(8200) })
-      }),
-      { apiKey: "secret", fetch: fetchGoogle, log: vi.fn() }
-    );
-
-    expect(invalid.status).toBe(400);
-    expect(oversized.status).toBe(413);
-    expect(fetchGoogle).not.toHaveBeenCalled();
-  });
-
-  it("returns a safe error instead of the upstream response", async () => {
+  it("rejects malformed ORS geometry instead of returning a partial route", async () => {
+    const malformed = structuredClone(orsResponse);
+    malformed.features[0]!.geometry.coordinates = [[88.3639, 22.5726]];
     const response = await handleRouteRequest(createRequest(input), {
       apiKey: "secret",
-      fetch: vi.fn(async () => new Response("private upstream detail", { status: 500 })),
+      fetch: vi.fn(async () => Response.json(malformed)),
       log: vi.fn()
     });
 
     expect(response.status).toBe(502);
     expect(await response.json()).toEqual({
-      code: "ROUTES_UPSTREAM",
-      message: "Google Routes could not calculate this walk."
+      code: "ROUTES_RESPONSE",
+      message: "The walking route provider returned an invalid route."
     });
   });
 
-  it("rejects a cross-origin browser request", async () => {
-    const request = createRequest(input, "https://other.example");
-    const response = await handleRouteRequest(request, {
+  it("translates an upstream rate limit without leaking its response", async () => {
+    const response = await handleRouteRequest(createRequest(input), {
       apiKey: "secret",
-      fetch: vi.fn(),
+      fetch: vi.fn(async () =>
+        new Response("private provider detail", {
+          status: 429,
+          headers: { "Retry-After": "17" }
+        })
+      ),
       log: vi.fn()
     });
+
+    expect(response.status).toBe(429);
+    expect(response.headers.get("Retry-After")).toBe("17");
+    expect(await response.json()).toEqual({
+      code: "ROUTES_RATE_LIMITED",
+      message: "The walking route service is busy. Try again shortly."
+    });
+  });
+
+  it("aborts a stalled provider before the serverless deadline", async () => {
+    vi.useFakeTimers();
+    const fetchHeiGit = vi.fn<typeof fetch>((_input, init) =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          "abort",
+          () => reject(new DOMException("Aborted", "AbortError")),
+          { once: true }
+        );
+      })
+    );
+    const pending = handleRouteRequest(createRequest(input), {
+      apiKey: "secret",
+      fetch: fetchHeiGit,
+      log: vi.fn()
+    });
+
+    await vi.advanceTimersByTimeAsync(8_000);
+    const response = await pending;
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ code: "ROUTES_UNAVAILABLE" });
+    expect(fetchHeiGit.mock.calls[0]?.[1]?.signal?.aborted).toBe(true);
+    vi.useRealTimers();
+  });
+
+  it("rejects invalid and oversized bodies before contacting the provider", async () => {
+    const fetchHeiGit = vi.fn();
+    const invalid = await handleRouteRequest(
+      createRequest({ ...input, origin: { lat: 500, lng: 88 } }),
+      { apiKey: "secret", fetch: fetchHeiGit, log: vi.fn() }
+    );
+    const oversized = await handleRouteRequest(
+      new Request("https://app.example/api/routes", {
+        method: "POST",
+        headers: requestHeaders(),
+        body: JSON.stringify({ padding: "x".repeat(8200) })
+      }),
+      { apiKey: "secret", fetch: fetchHeiGit, log: vi.fn() }
+    );
+
+    expect(invalid.status).toBe(400);
+    expect(oversized.status).toBe(413);
+    expect(fetchHeiGit).not.toHaveBeenCalled();
+  });
+
+  it("rejects a cross-origin browser request", async () => {
+    const response = await handleRouteRequest(
+      createRequest(input, "https://other.example"),
+      { apiKey: "secret", fetch: vi.fn(), log: vi.fn() }
+    );
 
     expect(response.status).toBe(403);
   });
 
   it("rate limits a trusted hosting client without logging its IP", async () => {
-    const fetchGoogle = vi.fn<typeof fetch>(async () =>
-      Response.json(googleResponse, { status: 200 })
-    );
+    const fetchHeiGit = vi.fn<typeof fetch>(async () => Response.json(orsResponse));
     const log = vi.fn();
     const limiter = createClientRateLimiter({
       limit: 2,
@@ -166,7 +289,7 @@ describe("handleRouteRequest", () => {
     });
     const dependencies = {
       apiKey: "secret",
-      fetch: fetchGoogle,
+      fetch: fetchHeiGit,
       log,
       now: () => 1_000,
       rateLimiter: limiter
@@ -178,37 +301,40 @@ describe("handleRouteRequest", () => {
 
     expect(limited.status).toBe(429);
     expect(limited.headers.get("Retry-After")).toBe("60");
-    expect(fetchGoogle).toHaveBeenCalledTimes(2);
+    expect(fetchHeiGit).toHaveBeenCalledTimes(2);
     expect(JSON.stringify(log.mock.calls)).not.toContain("203.0.113.10");
   });
 
   it("rejects a missing or spoof-prone client address before routing", async () => {
-    const fetchGoogle = vi.fn();
-    const withoutHostingIp = createRequest(input);
-    withoutHostingIp.headers.delete("x-vercel-forwarded-for");
-    withoutHostingIp.headers.set("x-forwarded-for", "198.51.100.2");
-
-    const response = await handleRouteRequest(withoutHostingIp, {
+    const request = createRequest(input);
+    request.headers.delete("x-vercel-forwarded-for");
+    request.headers.set("x-forwarded-for", "198.51.100.2");
+    const fetchHeiGit = vi.fn();
+    const response = await handleRouteRequest(request, {
       apiKey: "secret",
-      fetch: fetchGoogle,
+      fetch: fetchHeiGit,
       log: vi.fn(),
       rateLimiter: createClientRateLimiter()
     });
 
     expect(response.status).toBe(400);
     expect(await response.json()).toMatchObject({ code: "CLIENT_ID_REQUIRED" });
-    expect(fetchGoogle).not.toHaveBeenCalled();
+    expect(fetchHeiGit).not.toHaveBeenCalled();
   });
 });
+
+function requestHeaders(origin = "https://app.example") {
+  return {
+    "Content-Type": "application/json",
+    Origin: origin,
+    "x-vercel-forwarded-for": "203.0.113.10"
+  };
+}
 
 function createRequest(body: unknown, origin = "https://app.example"): Request {
   return new Request("https://app.example/api/routes", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Origin: origin,
-      "x-vercel-forwarded-for": "203.0.113.10"
-    },
+    headers: requestHeaders(origin),
     body: JSON.stringify(body)
   });
 }
