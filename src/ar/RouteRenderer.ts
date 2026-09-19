@@ -141,7 +141,8 @@ class ThreeRouteRenderBackend implements RouteRenderBackend {
   });
   private readonly mesh = new THREE.Mesh(this.geometry, this.material);
   private readonly edges = new THREE.LineSegments(
-    new THREE.EdgesGeometry(this.geometry),
+    // Route vertices arrive in updateGeometry; EdgesGeometry requires them.
+    new THREE.BufferGeometry(),
     this.edgeMaterial
   );
   private edgeGeometry = this.edges.geometry;

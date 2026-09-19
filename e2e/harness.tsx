@@ -76,7 +76,9 @@ createRoot(document.getElementById("root")!).render(
         }
       };
     }}
-    backendFactory={() => new FakeRenderer()}
+    {...(scenario === "real-renderer"
+      ? {}
+      : { backendFactory: () => new FakeRenderer() })}
   />
 );
 
