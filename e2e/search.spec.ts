@@ -17,7 +17,7 @@ test("clears a previous search failure when input changes and results recover", 
     } : { json: { suggestions: [suggestion] } });
   });
   await page.goto("/");
-  const input = page.getByRole("searchbox", { name: "Destination" });
+  const input = page.locator(".destination-search").getByRole("searchbox", { name: "Destination" });
   await input.fill("Fail");
   await expect(page.getByRole("alert")).toHaveText(/Destination search could not be completed/);
   await input.fill("Library");
@@ -62,7 +62,7 @@ test("normalizes mobile location, suppresses short input, and renders the select
   await page.goto("/");
   await page.getByRole("button", { name: "Use my location" }).click();
   await expect(page.getByText(/Location ready.*15 m accuracy/)).toBeVisible();
-  const input = page.getByRole("searchbox", { name: "Destination" });
+  const input = page.locator(".destination-search").getByRole("searchbox", { name: "Destination" });
   await input.fill("L");
   // Observe longer than the 300ms debounce to prove no short request is sent.
   await page.waitForTimeout(400);
