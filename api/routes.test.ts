@@ -2,6 +2,10 @@
 
 import { describe, expect, it, vi } from "vitest";
 import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import ts from "typescript";
 import {
   buildHeiGitRouteRequest,
   createClientRateLimiter,
@@ -106,40 +110,66 @@ describe("mapOrsManeuver", () => {
 });
 
 describe("handleRouteRequest", () => {
-  it("normalizes route geometry under native Node module loading", () => {
-    const result = spawnSync(process.execPath, ["--input-type=module", "--eval", `
-      import { registerHooks } from "node:module";
-      import { readFileSync } from "node:fs";
-      import { extname } from "node:path";
-      // Resolve the adapter's extensionless TS imports without bundling packages.
-      registerHooks({ resolve(specifier, context, nextResolve) {
-        return nextResolve(specifier.startsWith(".") && !extname(specifier)
-          ? specifier + ".ts" : specifier, context);
-      } });
-      const { handleRouteRequest } = await import("./api/routes.ts");
-      const { input, provider } = JSON.parse(readFileSync(0, "utf8"));
-      const response = await handleRouteRequest(new Request("https://app.example/api/routes", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-vercel-forwarded-for": "203.0.113.10" },
-        body: JSON.stringify(input)
-      }), { apiKey: "test-secret", fetch: async () => Response.json(provider), log: () => {} });
-      console.log(JSON.stringify({ status: response.status, payload: await response.json() }));
-    `], { input: JSON.stringify({ input, provider: orsResponse }), encoding: "utf8" });
+  it("loads emitted search and route handlers in native Node ESM", () => {
+    const root = path.resolve(import.meta.dirname, "..");
+    const output = mkdtempSync(path.join(tmpdir(), "ar-api-esm-"));
+    try {
+      const program = ts.createProgram(
+        [path.join(root, "api/search.ts"), path.join(root, "api/routes.ts")],
+        {
+          target: ts.ScriptTarget.ES2023,
+          module: ts.ModuleKind.ESNext,
+          moduleResolution: ts.ModuleResolutionKind.Bundler,
+          esModuleInterop: true,
+          skipLibCheck: true,
+          rootDir: root,
+          outDir: output,
+          types: []
+        }
+      );
+      expect(program.emit().emitSkipped).toBe(false);
+      writeFileSync(path.join(output, "package.json"), '{"type":"module"}');
+      symlinkSync(path.join(root, "node_modules"), path.join(output, "node_modules"), "dir");
+      const result = spawnSync(process.execPath, ["--input-type=module", "--eval", `
+        import { readFileSync } from "node:fs";
+        const { handleRouteRequest } = await import("./api/routes.js");
+        const { handleSearchRequest } = await import("./api/search.js");
+        const { input, provider } = JSON.parse(readFileSync(0, "utf8"));
+        const response = await handleRouteRequest(new Request("https://app.example/api/routes", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-vercel-forwarded-for": "203.0.113.10" },
+          body: JSON.stringify(input)
+        }), { apiKey: "test-secret", fetch: async () => Response.json(provider), log: () => {} });
+        const search = await handleSearchRequest(new Request("https://app.example/api/search", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-vercel-forwarded-for": "203.0.113.10" },
+          body: JSON.stringify({ query: "Heidelberg" })
+        }), {
+          apiKey: "test-secret",
+          fetch: async () => Response.json({ type: "FeatureCollection", features: [] }),
+          log: () => {}
+        });
+        console.log(JSON.stringify({ status: response.status, payload: await response.json(), searchStatus: search.status }));
+      `], { cwd: output, input: JSON.stringify({ input, provider: orsResponse }), encoding: "utf8" });
 
-    expect(result.status, result.stderr).toBe(0);
-    expect(JSON.parse(result.stdout)).toMatchObject({
-      status: 200,
-      payload: {
-        encodedPolyline: "wuwhCkqizOg^g^g^g^",
-        distanceMeters: 1200,
-        durationSeconds: 932,
-        steps: [
-          { maneuver: "STRAIGHT", polyline: "wuwhCkqizOg^g^" },
-          { maneuver: "TURN_LEFT", polyline: "_uxhCspjzOg^g^" }
-        ]
-      }
-    });
-  });
+      expect(result.status, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        searchStatus: 200,
+        status: 200,
+        payload: {
+          encodedPolyline: "wuwhCkqizOg^g^g^g^",
+          distanceMeters: 1200,
+          durationSeconds: 932,
+          steps: [
+            { maneuver: "STRAIGHT", polyline: "wuwhCkqizOg^g^" },
+            { maneuver: "TURN_LEFT", polyline: "_uxhCspjzOg^g^" }
+          ]
+        }
+      });
+    } finally {
+      rmSync(output, { recursive: true, force: true });
+    }
+  }, 15_000);
 
   it("normalizes ORS GeoJSON into the existing RoutePlan boundary", async () => {
     const fetchHeiGit = vi.fn<typeof fetch>(async () =>

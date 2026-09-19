@@ -4,19 +4,19 @@ import {
   routeApiResponseSchema,
   routeRequestSchema,
   type RouteRequestInput
-} from "../src/google/routeSchemas";
-import { createHeiGitHeaders, HEIGIT_ENDPOINTS } from "./providers/heigitConfig";
+} from "../src/google/routeSchemas.js";
+import { createHeiGitHeaders, HEIGIT_ENDPOINTS } from "./providers/heigitConfig.js";
 import {
   createUpstreamRequestSignal,
   safeRetryAfter
-} from "./providers/upstreamRequest";
+} from "./providers/upstreamRequest.js";
 import {
   createClientRateLimiter,
   trustedClientId,
   type ClientRateLimiter
-} from "./requestPolicy";
+} from "./requestPolicy.js";
 
-export { createClientRateLimiter } from "./requestPolicy";
+export { createClientRateLimiter } from "./requestPolicy.js";
 
 const MAX_BODY_BYTES = 8 * 1024;
 const longitudeSchema = z.number().finite().min(-180).max(180);

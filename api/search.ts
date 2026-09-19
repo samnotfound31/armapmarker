@@ -1,14 +1,14 @@
 import { z } from "zod";
-import { createHeiGitHeaders, HEIGIT_ENDPOINTS } from "./providers/heigitConfig";
+import { createHeiGitHeaders, HEIGIT_ENDPOINTS } from "./providers/heigitConfig.js";
 import {
   createUpstreamRequestSignal,
   safeRetryAfter
-} from "./providers/upstreamRequest";
+} from "./providers/upstreamRequest.js";
 import {
   createClientRateLimiter,
   trustedClientId,
   type ClientRateLimiter
-} from "./requestPolicy";
+} from "./requestPolicy.js";
 
 const MAX_BODY_BYTES = 2 * 1024;
 const longitudeSchema = z.number().finite().min(-180).max(180);
