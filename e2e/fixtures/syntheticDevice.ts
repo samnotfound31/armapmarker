@@ -9,7 +9,9 @@ export async function installSyntheticDevice(page: Page): Promise<void> {
     if (location.hostname === "127.0.0.1") {
       Reflect.deleteProperty(Navigator.prototype, "serviceWorker");
     }
-    Object.defineProperty(screen.orientation, "angle", { configurable: true, get: () => 0 });
+    Object.defineProperty(Object.getPrototypeOf(screen.orientation), "angle", {
+      configurable: true, get: () => 0
+    });
     const state = {
       cameraCalls: 0, orientationPrompts: 0, motionPrompts: 0,
       permissionsWithoutGesture: 0, watches: new Map<number, number>(),
@@ -90,6 +92,7 @@ export async function alignActualCalibration(page: Page): Promise<void> {
   await expect(road).toBeVisible();
   const box = (await road.boundingBox())!;
   await road.click({ position: { x: box.width / 2, y: box.height * 0.85 } });
+  await expect(page.getByText("Tap a far point on the same path centre.")).toBeVisible();
   await road.click({ position: { x: box.width / 2, y: box.height * 0.5 } });
   await expect(page.getByRole("button", { name: "Scan road features" })).toBeVisible();
   await page.getByRole("button", { name: "Scan road features" }).click();
