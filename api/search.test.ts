@@ -2,6 +2,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 import { handleSearchRequest } from "./search";
+import { requestOrsDestinationSuggestions } from "../src/ors/destinationSearchAdapter";
 
 const searchInput = {
   query: "City Museum",
@@ -43,6 +44,28 @@ const peliasResponse = {
 };
 
 describe("handleSearchRequest", () => {
+  it.each([undefined, 42])(
+    "accepts the client request with geolocation altitude %s",
+    async (altitudeMeters) => {
+      const origin = { ...searchInput.origin, ...(altitudeMeters === undefined ? {} : { altitudeMeters }) };
+      const fetchBroker: typeof fetch = async (_url, init) =>
+        handleSearchRequest(new Request("https://app.example/api/search", {
+          ...init,
+          headers: { ...init?.headers, "x-vercel-forwarded-for": "203.0.113.10" }
+        }), {
+          apiKey: "test-secret",
+          fetch: async () => Response.json(peliasResponse),
+          log: vi.fn()
+        });
+
+      const suggestions = await requestOrsDestinationSuggestions(
+        "City Museum", origin, new AbortController().signal, fetchBroker
+      );
+      expect(suggestions).toHaveLength(1);
+      expect(suggestions[0]?.name).toBe("City Museum");
+    }
+  );
+
   it("normalizes Pelias autocomplete results without exposing the key", async () => {
     const fetchHeiGit = vi.fn<typeof fetch>(async () =>
       Response.json(peliasResponse)

@@ -34,7 +34,10 @@ export async function requestOrsDestinationSuggestions(
   const response = await fetchSearch("/api/search", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ query, ...(origin ? { origin } : {}) }),
+    body: JSON.stringify({
+      query,
+      ...(origin ? { origin: { lat: origin.lat, lng: origin.lng } } : {})
+    }),
     signal
   });
   if (!response.ok) {

@@ -107,6 +107,58 @@ describe("createOrsDestinationSearchAdapter", () => {
     expect(host).toBeEmptyDOMElement();
   });
 
+  it("suppresses empty and one-character input, then debounces a valid two-character query", async () => {
+    vi.useFakeTimers();
+    const host = document.createElement("div");
+    document.body.append(host);
+    const search = vi.fn(async () => [destination]);
+    const onError = vi.fn();
+    const dispose = await createOrsDestinationSearchAdapter(search).mount(host, {
+      onSelect: vi.fn(), onError
+    });
+    const input = screen.getByRole("searchbox");
+    for (const value of ["", "C", " C "]) {
+      fireEvent.input(input, { target: { value } });
+      await vi.advanceTimersByTimeAsync(300);
+    }
+    expect(search).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+    fireEvent.input(input, { target: { value: "Ci" } });
+    await vi.advanceTimersByTimeAsync(299);
+    expect(search).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(search).toHaveBeenCalledOnce();
+    expect(screen.getByRole("button", { name: /city museum/i })).toBeVisible();
+    expect(onError).not.toHaveBeenCalled();
+    dispose();
+  });
+
+  it("ignores an older response even when its request ignores abort", async () => {
+    vi.useFakeTimers();
+    const host = document.createElement("div");
+    document.body.append(host);
+    let resolveOld!: (suggestions: Destination[]) => void;
+    const older = new Promise<Destination[]>((resolve) => { resolveOld = resolve; });
+    const newer = { ...destination, name: "New Museum", formattedAddress: "New Museum, Kolkata" };
+    const search = vi.fn().mockReturnValueOnce(older).mockResolvedValueOnce([newer]);
+    const onError = vi.fn();
+    const dispose = await createOrsDestinationSearchAdapter(search).mount(host, {
+      onSelect: vi.fn(), onError
+    });
+    const input = screen.getByRole("searchbox");
+    fireEvent.input(input, { target: { value: "City" } });
+    await vi.advanceTimersByTimeAsync(300);
+    fireEvent.input(input, { target: { value: "New Museum" } });
+    await vi.advanceTimersByTimeAsync(300);
+    expect(screen.getByRole("button", { name: /new museum/i })).toBeVisible();
+    resolveOld([destination]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(screen.queryByRole("button", { name: /city museum/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /new museum/i })).toBeVisible();
+    expect(onError).not.toHaveBeenCalled();
+    dispose();
+  });
+
   it("shows an empty state without selecting fake data", async () => {
     vi.useFakeTimers();
     const host = document.createElement("div");
