@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, type Page } from "@playwright/test";
+import { test } from "./fixtures/previewTest";
 
 type RuntimeSmokeResult = {
   status: "ready" | "tracked" | "error";
@@ -9,6 +10,7 @@ type RuntimeSmokeResult = {
     status: string;
     featureCount: number;
     inlierCount: number;
+    qualityState: string;
     homography: readonly number[] | null;
   };
   cleanupVerified?: boolean;
@@ -84,3 +86,14 @@ async function readResult(page: Page): Promise<RuntimeSmokeResult> {
         .__OPENCV_RUNTIME_SMOKE__
   );
 }
+
+test("actual OpenCV treats a textureless frame sequence as tracking loss, not a runtime crash", async ({ page }) => {
+  test.setTimeout(120_000);
+  await page.goto("/runtime-smoke.html?mode=texture-loss");
+  await expect(page.locator("#runtime-status")).not.toHaveAttribute("data-status", "starting", { timeout: 90_000 });
+  const result = await readResult(page);
+  expect(result.status, result.error).toBe("tracked");
+  expect(result.trackerResult).toMatchObject({ status: "lost", featureCount: 0, inlierCount: 0, qualityState: "realign" });
+  expect(result.cleanupVerified).toBe(true);
+  expect(result.securityViolations).toEqual([]);
+});

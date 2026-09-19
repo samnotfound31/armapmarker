@@ -276,6 +276,9 @@ class OpenCvJsAdapter implements OpenCvAdapter {
     const previous = assertOpenCvFrame(previousFrame.opaque);
     const current = assertOpenCvFrame(currentFrame.opaque);
     const resources: Mat[] = [];
+    // An empty feature Mat is not a valid point array for optical flow.
+    // Report tracking loss so the quality gate can request re-alignment.
+    if (previous.features.rows === 0) return lostEstimate(resources, 0);
     try {
       const nextPoints = new this.cv.Mat();
       const forwardStatus = new this.cv.Mat();

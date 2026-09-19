@@ -9,6 +9,7 @@ type RuntimeSmokeResult = {
     status: string;
     featureCount: number;
     inlierCount: number;
+    qualityState: string;
     homography: Mat3 | null;
   };
   cleanupVerified?: boolean;
@@ -46,7 +47,13 @@ async function run(): Promise<void> {
 
     const [firstFrame, secondFrame] = deterministicProjectiveFrames();
     await tracker.process(firstFrame, 1000, IDENTITY);
-    const result = await tracker.process(secondFrame, 1033, IDENTITY);
+    let result = await tracker.process(secondFrame, 1033, IDENTITY);
+    if (mode === "texture-loss") {
+      const blank = new ImageData(firstFrame.width, firstFrame.height);
+      for (let index = 0; index < 12; index++) {
+        result = await tracker.process(blank, 1066 + index * 33, IDENTITY);
+      }
+    }
     tracker.dispose();
     const cleanupVerified = await rejectsAfterDispose(tracker, firstFrame, 1066);
     publish({
@@ -56,6 +63,7 @@ async function run(): Promise<void> {
         status: result.status,
         featureCount: result.quality.featureCount,
         inlierCount: result.quality.inlierCount,
+        qualityState: result.quality.state,
         homography: result.visualHomography
       },
       cleanupVerified,

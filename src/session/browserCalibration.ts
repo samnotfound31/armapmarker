@@ -142,13 +142,9 @@ export function createBrowserCalibrationRuntime(
               imageHeightPx,
               screenWidthPx: viewport.widthPx,
               screenHeightPx: viewport.heightPx,
-              rotationDeg: resolveDisplayRotation(
-                readScreenOrientationAngle(),
-                imageWidthPx,
-                imageHeightPx,
-                viewport.widthPx,
-                viewport.heightPx
-              )
+              // The card crops the camera image; its aspect ratio must not
+              // rotate taps away from the orientation captured above.
+              rotationDeg: displayRotation
             })
           : display;
       const imagePoint = tapDisplay.screenToImagePoint(point);

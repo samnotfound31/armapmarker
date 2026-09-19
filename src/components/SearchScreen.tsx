@@ -11,6 +11,7 @@ export type DestinationSearchCallbacks = {
   getOrigin?: () => GeoPoint | undefined;
   onSelect: (destination: Destination) => void;
   onError: (message: string) => void;
+  onQueryChange?: () => void;
 };
 
 export type DestinationSearchAdapter = {
@@ -130,7 +131,8 @@ export function SearchScreen({
         origin: originRef.current,
         getOrigin: () => originRef.current,
         onSelect: (destination) => onDestinationRef.current(destination),
-        onError: setDestinationError
+        onError: setDestinationError,
+        onQueryChange: () => setDestinationError(undefined)
       })
     )
       .then((mountedDispose) => {

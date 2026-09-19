@@ -126,6 +126,7 @@ export function createOrsDestinationSearchAdapter(
       };
 
       const onInput = () => {
+        callbacks.onQueryChange?.();
         generation += 1;
         const requestGeneration = generation;
         if (timer) clearTimeout(timer);
