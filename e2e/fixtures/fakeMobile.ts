@@ -50,13 +50,10 @@ export async function completeCalibration(page: Page): Promise<void> {
 }
 
 export async function completeRoadAlignment(page: Page): Promise<void> {
-  await page.getByRole("button", { name: /chest.*1\.4 m/i }).click();
-  await page.getByRole("button", { name: /capture standing pose/i }).click();
   const road = page.getByRole("button", { name: /road calibration view/i });
-  await road.click({ position: { x: 100, y: 70 } });
-  await road.click({ position: { x: 100, y: 240 } });
-  await page.getByRole("button", { name: /scan road features/i }).click();
-  await page.getByRole("button", { name: /lock route.*start ar/i }).click();
+  await expect(road).toBeEnabled();
+  const box = (await road.boundingBox())!;
+  await road.click({ position: { x: box.width / 2, y: box.height * 0.7 } });
   await expect(page.getByLabel(/augmented reality navigation view/i)).toBeVisible();
 }
 

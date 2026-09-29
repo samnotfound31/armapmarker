@@ -15,9 +15,25 @@ export async function installSyntheticDevice(page: Page): Promise<void> {
     const state = {
       cameraCalls: 0, orientationPrompts: 0, motionPrompts: 0,
       permissionsWithoutGesture: 0, watches: new Map<number, number>(),
-      streams: [] as MediaStream[], textured: true
+      streams: [] as MediaStream[], textured: true, overlayPixels: 0, pitch: 80, roll: 0
     };
     Object.assign(window, { __SYNTHETIC_DEVICE__: state });
+    // Observe actual overlay pixels immediately after drawing (the default
+    // framebuffer need not be preserved between frames). Never sample video.
+    const drawElements = WebGL2RenderingContext.prototype.drawElements;
+    let lastRead = 0;
+    WebGL2RenderingContext.prototype.drawElements = function(...args) {
+      drawElements.apply(this, args);
+      if (!(this.canvas instanceof HTMLCanvasElement) || !this.canvas.classList.contains("ar-overlay") || performance.now() - lastRead < 250) return;
+      lastRead = performance.now();
+      queueMicrotask(() => {
+      const pixels = new Uint8Array(this.drawingBufferWidth * this.drawingBufferHeight * 4);
+      this.readPixels(0,0,this.drawingBufferWidth,this.drawingBufferHeight,this.RGBA,this.UNSIGNED_BYTE,pixels);
+      let green = 0;
+      for (let i=0;i<pixels.length;i+=16) if (pixels[i+1]! > pixels[i]! * 1.5 && pixels[i+3]! > 20) green++;
+      state.overlayPixels = green;
+      });
+    };
     const fix = () => ({
       coords: {
         latitude: 20.353, longitude: 85.819, accuracy: 15,
@@ -48,7 +64,7 @@ export async function installSyntheticDevice(page: Page): Promise<void> {
     window.setInterval(() => {
       if (!state.orientationPrompts) return;
       const event = new Event("deviceorientation");
-      Object.assign(event, { alpha: 0, beta: 80, gamma: 0, absolute: true });
+      Object.assign(event, { alpha: 0, beta: state.pitch, gamma: state.roll, absolute: true });
       window.dispatchEvent(event);
     }, 50);
     Object.getPrototypeOf(navigator.mediaDevices).getUserMedia = async () => {
@@ -86,18 +102,10 @@ export async function installSyntheticDevice(page: Page): Promise<void> {
 }
 
 export async function alignActualCalibration(page: Page): Promise<void> {
-  await page.getByRole("button", { name: /chest.*1\.4 m/i }).click();
-  await page.getByRole("button", { name: /capture standing pose/i }).click();
   const road = page.getByRole("button", { name: /road calibration view/i });
-  await expect(road).toBeVisible();
+  await expect(road).toBeEnabled();
   const box = (await road.boundingBox())!;
-  await road.click({ position: { x: box.width / 2, y: box.height * 0.85 } });
-  await expect(page.getByText("Tap a far point on the same path centre.")).toBeVisible();
-  await road.click({ position: { x: box.width / 2, y: box.height * 0.5 } });
-  await expect(page.getByRole("button", { name: "Scan road features" })).toBeVisible();
-  await page.getByRole("button", { name: "Scan road features" }).click();
-  await expect(page.getByRole("button", { name: /lock route.*start AR/i })).toBeVisible({ timeout: 90_000 });
-  await page.getByRole("button", { name: /lock route.*start AR/i }).click();
+  await road.click({ position: { x: box.width / 2, y: box.height * 0.7 } });
   await expect(page.getByLabel("Augmented reality navigation view")).toBeVisible();
 }
 
@@ -111,6 +119,9 @@ declare global {
       watches: Map<number, number>;
       streams: MediaStream[];
       textured: boolean;
+      overlayPixels: number;
+      pitch: number;
+      roll: number;
     };
   }
 }

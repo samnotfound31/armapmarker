@@ -98,15 +98,18 @@ export class PoseFusion {
   updateVisual(update: VisualPoseUpdate): boolean {
     if (update.timestampMs <= this.lastVisualTimestampMs) return false;
     this.lastVisualTimestampMs = update.timestampMs;
-    this.visual = {
-      ...update,
-      imageHomography: limitVisualResidual(update.imageHomography, {
+    try {
+      const imageHomography = limitVisualResidual(update.imageHomography, {
         imageWidthPx: this.imageWidthPx,
         imageHeightPx: this.imageHeightPx,
         maxPointDisplacementPx: this.config.maxVisualDisplacementPx,
         maxConditionNumber: this.config.maxVisualConditionNumber
-      })
-    };
+      });
+      this.visual = { ...update, imageHomography };
+    } catch (error) {
+      if (!(error instanceof RangeError)) throw error;
+      return false;
+    }
     return true;
   }
 

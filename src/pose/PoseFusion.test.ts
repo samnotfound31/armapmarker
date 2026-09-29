@@ -21,6 +21,14 @@ const WEAK_QUALITY: TrackingQuality = { ...LOCKED_QUALITY, state: "weak" };
 const TRANSLATED: Mat3 = [1, 0, 0, 0, 1, 0, 40, -10, 1];
 
 describe("PoseFusion", () => {
+  it("rejects invalid visual data while retaining the last good correction and live sensor pose", () => {
+    const fusion = new PoseFusion(testCalibration());
+    fusion.updateVisual({ timestampMs: 1000, keyframeId: 1, imageHomography: TRANSLATED, quality: LOCKED_QUALITY });
+    expect(fusion.updateVisual({ timestampMs: 1100, keyframeId: 1,
+      imageHomography: [-1,0,0,0,1,0,0,0,1], quality: LOCKED_QUALITY })).toBe(false);
+    expect(fusion.snapshot(1100).visualCorrection.imageHomography).toEqual(TRANSLATED);
+  });
+
   it("keeps global route progress owned by GPS", () => {
     const fusion = new PoseFusion(testCalibration());
     fusion.updateGps({

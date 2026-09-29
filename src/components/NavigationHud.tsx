@@ -39,6 +39,8 @@ export function NavigationHud({
         Tracking {navigation.trackingQuality.state}
       </p>
 
+      <button type="button" className="alignment-adjust" onClick={onRealign}>Adjust alignment</button>
+
       <TrackingWarning
         quality={navigation.trackingQuality}
         realignRequired={navigation.realignRequired}

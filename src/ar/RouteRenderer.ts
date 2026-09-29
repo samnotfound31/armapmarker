@@ -8,7 +8,21 @@ import type {
   RouteGroundPoint
 } from "../domain/types";
 import { multiplyHomographies } from "../tracking/residualHomography";
-import { buildRouteRibbon } from "./routeRibbon";
+import { buildRouteRibbon, type RouteRibbon } from "./routeRibbon";
+import { applyMat4ToPoint } from "../geometry/groundCalibration";
+import { applyPixelHomography } from "./projection";
+import { sampleRouteGroundPoint } from "../route/prepareRoute";
+
+export type RouteRenderDiagnostics = {
+  routePointsAhead: number;
+  transformed: number;
+  inFrontOfCamera: number;
+  projected: number;
+  visibleMarkers: number;
+  geometryMarkers: number;
+  renderedMarkers: number;
+  reason: "visible" | "no-route-ahead" | "invalid-transform" | "behind-camera" | "outside-viewport" | "tracking-realign";
+};
 
 export type RouteGeometryBuffers = {
   positions: Float32Array;
@@ -53,6 +67,7 @@ export class RouteRenderer {
   private lastGeometryProgressMeters: number | null = null;
   private screenWidthPx: number;
   private screenHeightPx: number;
+  private ribbon: RouteRibbon | null = null;
   private disposed = false;
 
   constructor(private readonly options: RouteRendererOptions) {
@@ -76,7 +91,7 @@ export class RouteRenderer {
     this.backend.resize(widthPx, heightPx, clamp(devicePixelRatio, 1, 2));
   }
 
-  render(pose: PoseEstimate): void {
+  render(pose: PoseEstimate): RouteRenderDiagnostics | undefined {
     if (this.disposed) return;
     if (
       this.lastGeometryProgressMeters === null ||
@@ -84,6 +99,7 @@ export class RouteRenderer {
         this.geometryProgressThresholdMeters
     ) {
       const ribbon = buildRouteRibbon(this.options.route, pose.routeProgressMeters);
+      this.ribbon = ribbon;
       this.backend.updateGeometry({
         positions: ribbon.positions,
         indices: ribbon.indices,
@@ -110,6 +126,37 @@ export class RouteRenderer {
             : 0
     });
     this.backend.render();
+    return this.diagnostics(pose);
+  }
+
+  private diagnostics(pose: PoseEstimate): RouteRenderDiagnostics {
+    const result: RouteRenderDiagnostics = {
+      routePointsAhead: this.ribbon?.markers.length ?? 0, transformed: 0,
+      inFrontOfCamera: 0, projected: 0, visibleMarkers: 0,
+      geometryMarkers: this.ribbon?.markers.length ?? 0, renderedMarkers: 0, reason: "no-route-ahead"
+    };
+    const cameraFromRoute = multiplyMat4(pose.cameraFromGround, this.options.calibration.groundFromRoute);
+    const k = this.options.calibration.intrinsics;
+    for (const marker of this.ribbon?.markers ?? []) {
+      const point = sampleRouteGroundPoint(this.options.route, marker.routeDistanceMeters);
+      const camera = applyMat4ToPoint(cameraFromRoute, [point.rightMeters,point.upMeters + 0.025,point.forwardMeters]);
+      if (!camera.every(Number.isFinite)) continue;
+      result.transformed++;
+      if (camera[2] <= 0.05 || camera[2] > 100) continue;
+      result.inFrontOfCamera++;
+      const image = applyPixelHomography(pose.visualCorrection.imageHomography,
+        k.fxPx * camera[0]/camera[2] + k.cxPx, k.fyPx * camera[1]/camera[2] + k.cyPx);
+      const screen = image && applyPixelHomography(this.imageToScreen,image.xPx,image.yPx);
+      if (!screen) continue;
+      result.projected++;
+      if (screen.xPx >= 0 && screen.xPx <= this.screenWidthPx && screen.yPx >= 0 && screen.yPx <= this.screenHeightPx) result.visibleMarkers++;
+    }
+    result.renderedMarkers = pose.quality.state === "realign" ? 0 : result.visibleMarkers;
+    result.reason = result.routePointsAhead === 0 ? "no-route-ahead" :
+      result.transformed === 0 ? "invalid-transform" : result.inFrontOfCamera === 0 ? "behind-camera" :
+      result.projected === 0 ? "invalid-transform" : result.visibleMarkers === 0 ? "outside-viewport" :
+      pose.quality.state === "realign" ? "tracking-realign" : "visible";
+    return result;
   }
 
   dispose(): void {
@@ -155,6 +202,9 @@ class ThreeRouteRenderBackend implements RouteRenderBackend {
       antialias: true,
       powerPreference: "high-performance"
     });
+    // The sensor supplies this camera matrix; Three must not rebuild it from identity.
+    this.camera.matrixAutoUpdate = false;
+    this.camera.matrixWorldAutoUpdate = false;
     this.renderer.setClearColor(0x000000, 0);
     this.mesh.frustumCulled = false;
     this.edges.frustumCulled = false;

@@ -1,3 +1,5 @@
+import { buildCameraFromGroundAtLock } from "../src/geometry/groundCalibration";
+import { createDisplayTransform } from "../src/geometry/displayTransform";
 import { createRoot } from "react-dom/client";
 import type { Destination, PoseEstimate } from "../src/domain/types";
 import { ArPermissionError } from "../src/device/permissions";
@@ -91,7 +93,7 @@ function calibrationRuntime(): CalibrationRuntime {
           pitchRad: 0.4,
           rollRad: 0
         })),
-        cameraFromGroundAtLock: IDENTITY_MAT4,
+        cameraFromGroundAtLock: buildCameraFromGroundAtLock({alphaRad:0,betaRad:1.2,gammaRad:0},1.4),
         earthFromGroundAtLock: IDENTITY_MAT3
       }),
       scanFeatures: async () =>
@@ -101,8 +103,8 @@ function calibrationRuntime(): CalibrationRuntime {
           angularMotionRad: 0.04
         }))
     },
-    intrinsics: buildApproximateIntrinsics(1280, 720),
-    imageToScreen: IDENTITY_MAT3,
+    intrinsics: buildApproximateIntrinsics(720, 1280),
+    imageToScreen: createDisplayTransform({imageWidthPx:720,imageHeightPx:1280,screenWidthPx:innerWidth,screenHeightPx:innerHeight,rotationDeg:0}).imageToScreen,
     screenPointToGround: ({ yPx }) => (yPx < 150 ? [0, 0, 3] : [0, 0, 6]),
     dispose: () => undefined
   };

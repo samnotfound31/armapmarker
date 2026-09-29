@@ -1,105 +1,42 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { buildApproximateIntrinsics } from "../geometry/intrinsics";
-import { applyMat4ToPoint } from "../geometry/groundCalibration";
-import { IDENTITY_MAT3, IDENTITY_MAT4 } from "../test/geometryFixtures";
+import { buildCameraFromGroundAtLock } from "../geometry/groundCalibration";
+import { IDENTITY_MAT3 } from "../test/geometryFixtures";
 import { CalibrationScreen, type CalibrationFeed } from "./CalibrationScreen";
 
 const feed: CalibrationFeed = {
-  captureOrientation: async () => ({
-    samples: Array.from({ length: 5 }, () => ({
-      headingRad: 0,
-      pitchRad: 0.4,
-      rollRad: 0
-    })),
-    cameraFromGroundAtLock: IDENTITY_MAT4
-  }),
-  scanFeatures: async () =>
-    Array.from({ length: 20 }, () => ({
-      featureCount: 35,
-      inlierCount: 20,
-      angularMotionRad: 0.04
-    }))
+  captureOrientation: async () => ({ samples: [], cameraFromGroundAtLock:
+    buildCameraFromGroundAtLock({alphaRad: 0, betaRad: 1.2, gammaRad: 0}, 1.4) }),
+  scanFeatures: vi.fn(async () => [])
 };
-
-describe("CalibrationScreen", () => {
-  it("guides height, orientation, near/far taps, scan, and route lock", async () => {
+const props = {
+  feed, groundRoute: [
+    {rightMeters:0,upMeters:0,forwardMeters:0,routeDistanceMeters:0},
+    {rightMeters:0,upMeters:0,forwardMeters:30,routeDistanceMeters:30}],
+  calibrationProgressMeters: 0, intrinsics: buildApproximateIntrinsics(720,1280),
+  imageToScreen: IDENTITY_MAT3, onBack: vi.fn()
+};
+describe("CalibrationScreen demo flow", () => {
+  it("shows a provisional route and starts with one tap, no height or feature-scan gate", async () => {
     const onLock = vi.fn();
-    render(
-      <CalibrationScreen
-        feed={feed}
-        screenPointToGround={({ yPx }) => (yPx < 200 ? [0, 0, 3] : [0, 0, 6])}
-        groundRoute={groundRoute()}
-        calibrationProgressMeters={10}
-        intrinsics={buildApproximateIntrinsics(1920, 1080)}
-        imageToScreen={IDENTITY_MAT3}
-        onLock={onLock}
-        onBack={vi.fn()}
-      />
-    );
-
-    expect(screen.getByRole("button", { name: /chest.*1\.4 m/i })).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: /chest.*1\.4 m/i }));
-    fireEvent.click(screen.getByRole("button", { name: /capture standing pose/i }));
-    expect(await screen.findByText(/tap a near point/i)).toBeVisible();
-
-    const roadView = screen.getByRole("button", { name: /road calibration view/i });
-    fireEvent.pointerDown(roadView, { clientX: 100, clientY: 100 });
-    expect(await screen.findByText(/tap a far point/i)).toBeVisible();
-    fireEvent.pointerDown(roadView, { clientX: 100, clientY: 300 });
-    fireEvent.click(await screen.findByRole("button", { name: /scan road features/i }));
-    fireEvent.click(
-      await screen.findByRole("button", { name: /lock route.*start ar/i })
-    );
-
-    expect(onLock).toHaveBeenCalledWith(
-      expect.objectContaining({ stage: "locked", cameraHeightMeters: 1.4 })
-    );
-    const calibration = onLock.mock.lastCall?.[0];
-    expect(calibration.calibrationRouteDistanceMeters).toBe(10);
-    expect(applyMat4ToPoint(calibration.groundFromRoute, [0, 0, 0])).toEqual([
-      expect.closeTo(0),
-      0,
-      expect.closeTo(0)
-    ]);
-    expect(applyMat4ToPoint(calibration.groundFromRoute, [0, 0, 3])).toEqual([
-      expect.closeTo(0),
-      0,
-      expect.closeTo(3)
-    ]);
+    render(<CalibrationScreen {...props} screenPointToGround={() => [0,0,4]} onLock={onLock} />);
+    expect(screen.queryByRole("group", {name:/height/i})).not.toBeInTheDocument();
+    const road = await screen.findByRole("button", {name:/road calibration view/i});
+    await waitFor(() => expect(road).not.toBeDisabled());
+    expect(await screen.findByRole("img", {name:"Approximate ground route"})).toBeVisible();
+    fireEvent.pointerDown(road, {clientX:200,clientY:400});
+    await waitFor(() => expect(onLock).toHaveBeenCalledOnce());
+    expect(onLock).toHaveBeenCalledWith(expect.objectContaining({stage:"locked", cameraHeightMeters:1.4}));
+    expect(feed.scanFeatures).not.toHaveBeenCalled();
   });
-
-  it("keeps the tap stage and explains an invalid road ray", async () => {
-    render(
-      <CalibrationScreen
-        feed={feed}
-        screenPointToGround={() => null}
-        groundRoute={groundRoute()}
-        calibrationProgressMeters={10}
-        intrinsics={buildApproximateIntrinsics(1920, 1080)}
-        imageToScreen={IDENTITY_MAT3}
-        onLock={vi.fn()}
-        onBack={vi.fn()}
-      />
-    );
-    fireEvent.click(screen.getByRole("button", { name: /chest.*1\.4 m/i }));
-    fireEvent.click(screen.getByRole("button", { name: /capture standing pose/i }));
-    const roadView = await screen.findByRole("button", {
-      name: /road calibration view/i
-    });
-    fireEvent.pointerDown(roadView, { clientX: 100, clientY: 100 });
-
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      /aim lower at the road/i
-    );
-    expect(screen.getByText(/tap a near point/i)).toBeVisible();
+  it("keeps the simple tap flow when a ray cannot meet the ground", async () => {
+    const onLock=vi.fn();
+    render(<CalibrationScreen {...props} screenPointToGround={() => null} onLock={onLock} />);
+    const road=await screen.findByRole("button",{name:/road calibration view/i});
+    await waitFor(() => expect(road).not.toBeDisabled());
+    fireEvent.pointerDown(road,{clientX:200,clientY:400});
+    expect(await screen.findByRole("alert")).toHaveTextContent(/aim lower/i);
+    expect(onLock).not.toHaveBeenCalled();
   });
 });
-
-function groundRoute() {
-  return [
-    { rightMeters: 0, upMeters: 0, forwardMeters: -10, routeDistanceMeters: 0 },
-    { rightMeters: 0, upMeters: 0, forwardMeters: 0, routeDistanceMeters: 10 },
-    { rightMeters: 0, upMeters: 0, forwardMeters: 10, routeDistanceMeters: 20 }
-  ];
-}

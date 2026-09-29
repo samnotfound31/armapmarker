@@ -6,6 +6,7 @@ import type {
 } from "../domain/types";
 import {
   RouteRenderer,
+  type RouteRenderDiagnostics,
   type RouteRenderBackendFactory
 } from "../ar/RouteRenderer";
 import {
@@ -46,6 +47,8 @@ export function ArViewport({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const poseRef = useRef(pose);
   const failureCallbackRef = useRef(onFailure);
+  const [diagnostics, setDiagnostics] = useState<RouteRenderDiagnostics>();
+  const debugEnabled = new URLSearchParams(window.location.search).get("arDebug") === "1";
   const [compatibilityError, setCompatibilityError] = useState<string | null>(null);
   failureCallbackRef.current = onFailure;
 
@@ -144,8 +147,13 @@ export function ArViewport({
     };
     video.addEventListener("loadedmetadata", onLoadedMetadata);
 
-    const renderFrame = () => {
-      renderer.render(poseRef.current);
+    let lastDiagnosticsMs = 0;
+    const renderFrame = (nowMs: number) => {
+      const next = renderer.render(poseRef.current);
+      if (nowMs - lastDiagnosticsMs >= 250) {
+        lastDiagnosticsMs = nowMs;
+        setDiagnostics(next);
+      }
       frameId = requestAnimationFrame(renderFrame);
     };
     const startFrames = () => {
@@ -201,6 +209,19 @@ export function ArViewport({
         aria-label="Rear camera view"
       />
       <canvas ref={canvasRef} className="ar-overlay" aria-hidden="true" />
+      {debugEnabled && diagnostics && <output className="ar-debug" aria-label="AR diagnostics">
+        <div>State: {pose.quality.state === "weak" ?
+          pose.quality.visualUpdate === "valid" ? "RECOVERING" : pose.quality.visualUpdate === "rejected" ? "WEAK" : "APPROXIMATE" : pose.quality.state.toUpperCase()}</div>
+        <div>Visual features: {pose.quality.featureCount} · Inliers: {pose.quality.inlierCount}</div>
+        <div>Route points ahead: {diagnostics.routePointsAhead} · Transformed: {diagnostics.transformed}</div>
+        <div>In front: {diagnostics.inFrontOfCamera} · Projected: {diagnostics.projected}</div>
+        <div>Visible markers: {diagnostics.visibleMarkers} · Rendered: {diagnostics.renderedMarkers}</div>
+        <div>Last visual update: {pose.quality.visualUpdate ?? "initializing"}</div>
+        <div>Confidence: {(pose.quality.confidence ?? 0.3).toFixed(2)}</div>
+        <div>Reason: {pose.quality.rejectionReason ?? diagnostics.reason}</div>
+      </output>}
+      {diagnostics?.renderedMarkers === 0 && pose.quality.state !== "realign" &&
+        <p className="projection-hint">{diagnostics.reason === "no-route-ahead" ? "End of route ahead" : "Point toward the path with ground in view"}</p>}
       {compatibilityError ? (
         <div className="ar-compatibility" role="alert">
           WebGL is unavailable. {compatibilityError}

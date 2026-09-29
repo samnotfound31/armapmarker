@@ -11,9 +11,9 @@ export const DEFAULT_TRACKING_THRESHOLDS: Readonly<TrackingThresholds> = {
   weakInlierCount: 15,
   weakInlierRatio: 0.55,
   weakMedianReprojectionErrorPx: 3,
-  weakConsecutiveFrames: 5,
+  weakConsecutiveFrames: 1,
   realignInlierCount: 10,
-  realignConsecutiveFrames: 10,
+  realignConsecutiveFrames: 30,
   recoveryConsecutiveFrames: 3,
   maxResultAgeMs: 250
 };
@@ -33,6 +33,7 @@ export class TrackingQualityGate {
   private criticalFrames = 0;
   private recoveryFrames = 0;
   private hasLocked = false;
+  private poorSinceMs: number | null = null;
   private latestHomography: { matrix: Mat3; timestampMs: number } | null = null;
 
   constructor(
@@ -84,27 +85,22 @@ export class TrackingQualityGate {
     this.poorFrames = poor ? this.poorFrames + 1 : 0;
     this.criticalFrames = critical ? this.criticalFrames + 1 : 0;
 
-    if (!this.hasLocked) {
-      if (acquisitionReady) {
-        this.hasLocked = true;
-        this.currentState = "locked";
-      }
-    } else if (this.currentState === "realign") {
-      this.recoveryFrames = 0;
-    } else if (
-      this.criticalFrames >= this.thresholds.realignConsecutiveFrames
-    ) {
+    this.poorSinceMs = poor ? this.poorSinceMs ?? observation.timestampMs : null;
+    const sustainedFailure = this.criticalFrames >= this.thresholds.realignConsecutiveFrames ||
+      (this.poorSinceMs !== null && observation.timestampMs - this.poorSinceMs >= 3_000);
+    if (sustainedFailure) {
       this.currentState = "realign";
       this.recoveryFrames = 0;
-    } else if (
-      this.currentState === "locked" &&
-      this.poorFrames >= this.thresholds.weakConsecutiveFrames
-    ) {
-      this.currentState = "weak";
+    } else if (poor) {
       this.recoveryFrames = 0;
-    } else if (this.currentState !== "locked") {
+      if (this.currentState !== "realign" && this.poorFrames >= this.thresholds.weakConsecutiveFrames) {
+        this.currentState = "weak";
+      }
+    } else if (acquisitionReady) {
       this.recoveryFrames = stable ? this.recoveryFrames + 1 : 0;
-      if (this.recoveryFrames >= this.thresholds.recoveryConsecutiveFrames) {
+      if ((!this.hasLocked && this.currentState !== "realign") ||
+          this.recoveryFrames >= this.thresholds.recoveryConsecutiveFrames) {
+        this.hasLocked = true;
         this.currentState = "locked";
         this.poorFrames = 0;
         this.criticalFrames = 0;
@@ -117,7 +113,10 @@ export class TrackingQualityGate {
       featureCount: candidateCount,
       inlierCount,
       inlierRatio,
-      medianReprojectionErrorPx: reprojectionError
+      medianReprojectionErrorPx: reprojectionError,
+      confidence: this.currentState === "realign" ? 0 : poor ? 0.25 :
+        this.currentState === "locked" ? Math.min(1, inlierRatio) : 0.4,
+      visualUpdate: observation.motionValid ? "valid" : "rejected"
     };
     if (observation.observedHomography && observation.motionValid) {
       this.latestHomography = {

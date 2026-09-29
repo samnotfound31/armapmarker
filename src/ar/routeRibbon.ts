@@ -32,8 +32,8 @@ export type RouteRibbonOptions = {
 
 const DEFAULT_OPTIONS: Readonly<RouteRibbonOptions> = {
   markerSpacingMeters: 2.5,
-  startAheadMeters: 1,
-  maximumDrawDistanceMeters: 35,
+  startAheadMeters: 3,
+  maximumDrawDistanceMeters: 28,
   markerWidthMeters: 1.4,
   barLengthMeters: 0.35,
   arrowLengthMeters: 1.6,

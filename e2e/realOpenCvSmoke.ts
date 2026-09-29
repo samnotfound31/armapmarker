@@ -50,7 +50,7 @@ async function run(): Promise<void> {
     let result = await tracker.process(secondFrame, 1033, IDENTITY);
     if (mode === "texture-loss") {
       const blank = new ImageData(firstFrame.width, firstFrame.height);
-      for (let index = 0; index < 12; index++) {
+      for (let index = 0; index < 35; index++) {
         result = await tracker.process(blank, 1066 + index * 33, IDENTITY);
       }
     }

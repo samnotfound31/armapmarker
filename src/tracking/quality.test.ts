@@ -13,36 +13,27 @@ const lowTexture = lowTextureSequence as TrackingObservation[];
 const outliers = outlierSequence as TrackingObservation[];
 
 describe("TrackingQualityGate", () => {
-  it("requires thirty candidates and fifteen RANSAC inliers for initial lock", () => {
+  it("requires enough candidates, inliers and inlier ratio for initial lock", () => {
     const gate = new TrackingQualityGate(DEFAULT_TRACKING_THRESHOLDS);
 
     gate.update({ ...good[0]!, candidateCount: 29 });
     expect(gate.state).toBe("weak");
 
-    gate.update({ ...good[0]!, candidateCount: 30, inlierCount: 15 });
+    gate.update({ ...good[0]!, candidateCount: 30, inlierCount: 17 });
     expect(gate.state).toBe("locked");
   });
 
-  it("enters weak only after five consecutive poor frames", () => {
+  it("marks the first rejected frame weak and allows a brief recovery window", () => {
     const gate = lockedGate();
-
-    lowTexture.slice(0, 4).forEach((observation) => gate.update(observation));
-    expect(gate.state).toBe("locked");
-
-    gate.update(lowTexture[4]!);
+    gate.update(lowTexture[0]!);
     expect(gate.state).toBe("weak");
   });
 
-  it("enters realign after ten critical frames", () => {
+  it("enters realign only after sustained critical frames", () => {
     const gate = lockedGate();
-    const critical = [...outliers, ...outliers].map((observation, index) => ({
-      ...observation,
-      timestampMs: 1300 + index * 33
-    }));
-
-    critical.slice(0, 9).forEach((observation) => gate.update(observation));
+    for (let index = 0; index < 29; index++) gate.update({...outliers[0]!,timestampMs:1300+index*80});
     expect(gate.state).toBe("weak");
-    gate.update(critical[9]!);
+    gate.update({...outliers[0]!,timestampMs:1300+29*80});
     expect(gate.state).toBe("realign");
   });
 
@@ -58,21 +49,22 @@ describe("TrackingQualityGate", () => {
     expect(gate.state).toBe("locked");
   });
 
-  it("latches realign through later stable frames until a fresh gate is constructed", () => {
+  it("can recover automatically from realign after sustained valid evidence", () => {
     const gate = lockedGate();
-    const critical = [...outliers, ...outliers].slice(0, 10).map((observation, index) => ({
-      ...observation,
-      timestampMs: 1300 + index * 33
-    }));
-    critical.forEach((observation) => gate.update(observation));
+    for (let index = 0; index < 30; index++) gate.update({...outliers[0]!,timestampMs:1300+index*80});
     expect(gate.state).toBe("realign");
-
-    for (let index = 0; index < 12; index += 1) {
-      gate.update({ ...good[index % good.length]!, timestampMs: 2000 + index * 33 });
-    }
-
+    gate.update({...good[0]!,timestampMs:4000});
     expect(gate.state).toBe("realign");
-    expect(new TrackingQualityGate(DEFAULT_TRACKING_THRESHOLDS).state).toBe("weak");
+    gate.update({...good[1]!,timestampMs:4100});
+    gate.update({...good[2]!,timestampMs:4200});
+    expect(gate.state).toBe("locked");
+  });
+
+  it("times out prolonged poor evidence even before any initial lock", () => {
+    const gate = new TrackingQualityGate();
+    gate.update({...outliers[0]!,timestampMs:0});
+    gate.update({...outliers[0]!,timestampMs:3100});
+    expect(gate.state).toBe("realign");
   });
 
   it("rejects observations and homographies older than 250 milliseconds", () => {
@@ -106,7 +98,7 @@ describe("TrackingQualityGate", () => {
     };
 
     for (let index = 0; index < 4; index += 1) gate.update(ratioFailure);
-    expect(gate.state).toBe("locked");
+    expect(gate.state).toBe("weak");
     gate.update(reprojectionFailure);
     expect(gate.state).toBe("weak");
   });

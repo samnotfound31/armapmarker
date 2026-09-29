@@ -2,6 +2,7 @@ import type { Mat3, TrackingQuality } from "../domain/types";
 import type { CV, Mat } from "@techstark/opencv-js";
 import { TrackingQualityGate } from "./quality";
 import {
+  assertVisualContinuity,
   invertHomography,
   multiplyHomographies,
   normalizeHomography,
@@ -107,57 +108,50 @@ export class OpenCvTracker {
     let estimate: CvTrackEstimate | null = null;
     try {
       estimate = await this.adapter.track(previousFrame, currentFrame);
-      const observedHomography = estimate.homography
-        ? toFullImageHomography(
-            estimate.homography,
-            previousFrame.trackingFromImage,
-            currentFrame.trackingFromImage
-          )
-        : undefined;
+      let accumulatedVisualHomography: Mat3 | null = null;
+      let rejectionReason = "insufficient-features";
+      const supported = estimate.motionValid && estimate.homography !== null &&
+        estimate.trackedFeatureCount >= 15 && estimate.inlierCount >= 15 &&
+        estimate.inlierCount / estimate.trackedFeatureCount >= 0.55 &&
+        estimate.medianReprojectionErrorPx <= 3;
+      if (supported) {
+        // Only validation failures are recoverable measurements. OpenCV/runtime
+        // allocation failures still propagate to the existing unavailable path.
+        try {
+          const observed = toFullImageHomography(estimate.homography!,
+            previousFrame.trackingFromImage, currentFrame.trackingFromImage);
+          const prior = normalizeHomography(multiplyHomographies(
+            this.residualSinceKeyframe, this.keyframeBaseHomography));
+          const candidate = normalizeHomography(
+            multiplyHomographies(observed, multiplyHomographies(prior, invertHomography(sensorHomography))));
+          assertVisualContinuity(candidate, prior, currentFrame.imageWidthPx, currentFrame.imageHeightPx);
+          accumulatedVisualHomography = limitVisualResidual(candidate, {
+            ...DEFAULT_VISUAL_RESIDUAL_LIMITS,
+            imageWidthPx: currentFrame.imageWidthPx,
+            imageHeightPx: currentFrame.imageHeightPx
+          });
+        } catch (error) {
+          if (!(error instanceof RangeError)) throw error;
+          rejectionReason = "invalid-homography";
+        }
+      }
       const outcome = this.qualityGate.update({
-        timestampMs,
-        candidateCount: estimate.trackedFeatureCount,
+        timestampMs, candidateCount: estimate.trackedFeatureCount,
         inlierCount: estimate.inlierCount,
         medianReprojectionErrorPx: estimate.medianReprojectionErrorPx,
-        motionValid: estimate.motionValid && estimate.homography !== null,
-        ...(observedHomography ? { observedHomography } : {})
+        motionValid: accumulatedVisualHomography !== null
       });
-      if (!observedHomography || !estimate.motionValid) {
+      if (!accumulatedVisualHomography) {
+        // Move the optical-flow frame forward, but retain the last accepted
+        // correction. A rejected candidate must never poison that transform.
         this.previousFrame = currentFrame;
         deleteAllocations(previousFrame.resources);
         return {
-          status: "lost",
-          timestampMs,
-          keyframeId: this.keyframeId,
+          status: "lost", timestampMs, keyframeId: this.keyframeId,
           visualHomography: null,
-          quality: outcome.quality
+          quality: { ...outcome.quality, visualUpdate: "rejected", rejectionReason }
         };
       }
-
-      const previousAccumulatedHomography = normalizeHomography(
-        multiplyHomographies(
-          this.residualSinceKeyframe,
-          this.keyframeBaseHomography
-        )
-      );
-      const accumulatedVisualHomography = limitVisualResidual(
-        normalizeHomography(
-          multiplyHomographies(
-            observedHomography,
-            multiplyHomographies(
-              previousAccumulatedHomography,
-              invertHomography(sensorHomography)
-            )
-          )
-        ),
-        {
-          imageWidthPx: currentFrame.imageWidthPx,
-          imageHeightPx: currentFrame.imageHeightPx,
-          maxPointDisplacementPx:
-            DEFAULT_VISUAL_RESIDUAL_LIMITS.maxPointDisplacementPx,
-          maxConditionNumber: DEFAULT_VISUAL_RESIDUAL_LIMITS.maxConditionNumber
-        }
-      );
       let replacedKeyframe = false;
       if (outcome.quality.state === "locked") {
         this.framesSinceKeyframe += 1;
@@ -187,7 +181,7 @@ export class OpenCvTracker {
         timestampMs,
         keyframeId: this.keyframeId,
         visualHomography: accumulatedVisualHomography,
-        quality: outcome.quality
+        quality: { ...outcome.quality, visualUpdate: "valid" }
       };
     } catch (error) {
       this.previousFrame = null;
@@ -363,7 +357,8 @@ class OpenCvJsAdapter implements OpenCvAdapter {
         trackedFeatureCount: matches.count,
         inlierCount,
         medianReprojectionErrorPx: median(reprojectionErrors),
-        motionValid: isPlausibleMotion(
+        motionValid: hasSpatialSupport(matches.destination, unsignedByteData(inlierMask),
+          current.grayRoadRoi.cols, current.grayRoadRoi.rows) && isPlausibleMotion(
           homography,
           current.grayRoadRoi.cols,
           current.grayRoadRoi.rows
@@ -654,4 +649,24 @@ function initializingQuality(featureCount: number): TrackingQuality {
 function deleteAllocations(allocations: readonly CvAllocation[]): void {
   const uniqueAllocations = new Set(allocations);
   for (const allocation of uniqueAllocations) allocation.delete();
+}
+
+// A homography fitted to a tiny patch or an almost straight line does not
+// constrain the whole ground image, even with an apparently good inlier ratio.
+export function hasSpatialSupport(points: readonly number[], mask: Uint8Array, width: number, height: number): boolean {
+  const xs: number[] = [], ys: number[] = [];
+  for (let i=0;i<mask.length;i++) {
+    if (mask[i] && Number.isFinite(points[2*i]) && Number.isFinite(points[2*i+1])) {
+      xs.push(points[2*i]! / width); ys.push(points[2*i+1]! / height);
+    }
+  }
+  if (xs.length < 4) return false;
+  const spreadX = Math.max(...xs) - Math.min(...xs), spreadY = Math.max(...ys) - Math.min(...ys);
+  const meanX = xs.reduce((s,x) => s+x,0)/xs.length, meanY = ys.reduce((s,y) => s+y,0)/ys.length;
+  let xx=0, yy=0, xy=0;
+  for (let i=0;i<xs.length;i++) {
+    const dx=xs[i]!-meanX, dy=ys[i]!-meanY;
+    xx+=dx*dx; yy+=dy*dy; xy+=dx*dy;
+  }
+  return spreadX >= 0.1 && spreadY >= 0.1 && spreadX*spreadY >= 0.025 && xx*yy-xy*xy > 0.01*xx*yy;
 }

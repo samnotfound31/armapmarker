@@ -123,13 +123,7 @@ describe("App integrated AR walk", () => {
     fireEvent.click(screen.getByRole("button", { name: /enable camera and sensors/i }));
 
     expect(await screen.findByRole("heading", { name: /align route to the road/i })).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: /chest.*1\.4 m/i }));
-    fireEvent.click(screen.getByRole("button", { name: /capture standing pose/i }));
-    const roadView = await screen.findByRole("button", { name: /road calibration view/i });
-    fireEvent.pointerDown(roadView, { clientX: 100, clientY: 100 });
-    fireEvent.pointerDown(roadView, { clientX: 100, clientY: 300 });
-    fireEvent.click(await screen.findByRole("button", { name: /scan road features/i }));
-    fireEvent.click(await screen.findByRole("button", { name: /lock route.*start ar/i }));
+    await completeCalibration();
 
     expect(createSession).toHaveBeenCalledOnce();
     expect(await screen.findByLabelText(/augmented reality navigation view/i)).toBeVisible();
@@ -420,7 +414,7 @@ describe("App integrated AR walk", () => {
 
     expect(lifecycle.createCalibrationRuntime).toHaveBeenCalledTimes(2);
     expect(
-      await screen.findByRole("button", { name: /chest.*1\.4 m/i })
+      await screen.findByRole("button", { name: /road calibration view/i })
     ).toBeVisible();
     expect(screen.queryByRole("button", { name: /lock route.*start ar/i })).not.toBeInTheDocument();
   });
@@ -435,7 +429,7 @@ describe("App integrated AR walk", () => {
     expect(lifecycle.calibrationRuntimes[0]?.dispose).toHaveBeenCalledOnce();
     expect(lifecycle.createCalibrationRuntime).toHaveBeenCalledTimes(2);
     expect(
-      await screen.findByRole("button", { name: /chest.*1\.4 m/i })
+      await screen.findByRole("button", { name: /road calibration view/i })
     ).toBeVisible();
     expect(screen.queryByRole("button", { name: /lock route.*start ar/i })).not.toBeInTheDocument();
   });
@@ -488,17 +482,14 @@ async function reachCalibration(): Promise<void> {
 
 async function completeCalibration(): Promise<void> {
   await collectCalibrationEvidence();
-  fireEvent.click(await screen.findByRole("button", { name: /lock route.*start ar/i }));
+  const road = screen.getByRole("button", { name: /road calibration view/i });
+  fireEvent.pointerDown(road, { clientX: 100, clientY: 100 });
+  await waitFor(() => expect(screen.queryByRole("button", { name: /road calibration view/i })).not.toBeInTheDocument());
 }
 
 async function collectCalibrationEvidence(): Promise<void> {
-  fireEvent.click(screen.getByRole("button", { name: /chest.*1\.4 m/i }));
-  fireEvent.click(screen.getByRole("button", { name: /capture standing pose/i }));
-  const roadView = await screen.findByRole("button", { name: /road calibration view/i });
-  fireEvent.pointerDown(roadView, { clientX: 100, clientY: 100 });
-  fireEvent.pointerDown(roadView, { clientX: 100, clientY: 300 });
-  fireEvent.click(await screen.findByRole("button", { name: /scan road features/i }));
-  await screen.findByRole("button", { name: /lock route.*start ar/i });
+  const road = await screen.findByRole("button", { name: /road calibration view/i });
+  await waitFor(() => expect(road).not.toBeDisabled());
 }
 
 async function setupRecoveryApp(

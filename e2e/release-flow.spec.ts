@@ -29,7 +29,7 @@ test("real MVP runtime completes search, route, calibration, tracking, re-align 
       steps: [{ instruction: "Continue", maneuver: "STRAIGHT", distanceMeters: 111, polyline: "gef{BwoxjOgE?" }]
     } }));
   }
-  await page.goto("/");
+  await page.goto("/?arDebug=1");
   await page.getByRole("button", { name: "Use my location" }).click();
   await expect(page.getByText(/Location ready.*15 m accuracy/)).toBeVisible();
   const searchWait = page.waitForResponse((response) => response.url().endsWith("/api/search"));
@@ -67,7 +67,19 @@ test("real MVP runtime completes search, route, calibration, tracking, re-align 
   expect(await page.locator("canvas.ar-overlay").evaluate((element) =>
     (element as HTMLCanvasElement).getContext("webgl2")!.getError()
   )).toBe(0);
-  // Removing the synthetic texture must lead through weak to realign.
+  await expect.poll(() => page.evaluate(() => window.__SYNTHETIC_DEVICE__.overlayPixels)).toBeGreaterThan(20);
+  await expect(page.getByLabel("AR diagnostics")).toContainText(/Visible markers: [1-9]/);
+  // A brief feature loss leaves the real marker geometry drawn and recovers.
+  await page.evaluate(() => { window.__SYNTHETIC_DEVICE__.textured = false; });
+  await expect(page.getByText("Tracking weak", {exact:true})).toBeVisible();
+  await expect(page.getByLabel("AR diagnostics")).toContainText(/Rendered: [1-9]/);
+  expect(await page.evaluate(() => window.__SYNTHETIC_DEVICE__.overlayPixels)).toBeGreaterThan(20);
+  await page.evaluate(() => { window.__SYNTHETIC_DEVICE__.textured = true; });
+  await expect(page.getByText("Tracking locked", {exact:true})).toBeVisible();
+  await page.evaluate(() => { window.__SYNTHETIC_DEVICE__.pitch = 77; window.__SYNTHETIC_DEVICE__.roll = 2; });
+  await expect(page.getByLabel("AR diagnostics")).toContainText(/Rendered: [1-9]/);
+  // Sustained feature loss eventually offers the one-tap fallback.
+
   await page.evaluate(() => { window.__SYNTHETIC_DEVICE__.textured = false; });
   await expect(page.getByRole("button", { name: "Re-align", exact: true })).toBeVisible({ timeout: 30_000 });
   await page.getByRole("button", { name: "Re-align", exact: true }).click();

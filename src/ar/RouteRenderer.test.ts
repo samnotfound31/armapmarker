@@ -6,6 +6,28 @@ import { IDENTITY_MAT3, IDENTITY_MAT4 } from "../test/geometryFixtures";
 import { RouteRenderer } from "./RouteRenderer";
 
 describe("RouteRenderer", () => {
+  it("reports why a valid HUD route has no projected markers", () => {
+    const backend = new FakeRenderer();
+    const renderer = createRenderer(backend);
+    renderer.resize(390, 844);
+    const reversed = pose(0);
+    reversed.cameraFromGround = [1,0,0,0, 0,1,0,0, 0,0,-1,0, 0,0,0,1];
+    const result = renderer.render(reversed);
+    expect(result?.routePointsAhead).toBeGreaterThan(0);
+    expect(result?.inFrontOfCamera).toBe(0);
+    expect(result?.reason).toBe("behind-camera");
+  });
+
+  it("keeps geometry populated and opacity positive through a weak update", () => {
+    const backend = new FakeRenderer();
+    const renderer = createRenderer(backend);
+    renderer.render(pose(0));
+    renderer.render(pose(0, "weak"));
+    expect(backend.geometryCalls).toHaveLength(1);
+    expect(backend.geometryCalls[0]!.markerCount).toBeGreaterThan(0);
+    expect(backend.viewCalls.at(-1)!.overlayOpacity).toBeGreaterThan(0);
+  });
+
   it("rebuilds geometry only after progress crosses the sampling threshold", () => {
     const backend = new FakeRenderer();
     const renderer = createRenderer(backend);

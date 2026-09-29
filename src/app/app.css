@@ -734,3 +734,16 @@ button:disabled {
     animation-iteration-count: 1 !important;
   }
 }
+
+.quick-calibration { position: fixed; inset: 0; z-index: 10; background: #111; overflow: hidden; }
+.quick-calibration > .calibration-camera { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.ground-anchor-surface { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: transparent; padding: 0; touch-action: manipulation; }
+.ghost-route { width: 100%; height: 100%; pointer-events: none; }
+.ghost-route polygon { fill: #2dfb6f; fill-opacity: .4; stroke: #072c16; stroke-width: 2; }
+.quick-calibration-card { position: absolute; top: max(1rem, env(safe-area-inset-top)); left: 1rem; right: 1rem; max-width: 32rem; margin: auto; padding: 1rem; background: rgba(12,25,19,.94); color: white; border-radius: 1rem; }
+.quick-calibration-card h2, .quick-calibration-card p { margin: 0 0 .55rem; }
+.quick-calibration-card button { padding: .6rem 1rem; margin: .35rem .35rem 0 0; }
+.quick-calibration-card .status-line { color: #b0d5bf; }
+.ar-debug { position: absolute; z-index: 5; bottom: max(3rem, env(safe-area-inset-bottom)); left: .5rem; max-width: calc(100% - 1rem); padding: .6rem; border-radius: .5rem; background: rgba(0,0,0,.8); color: #d8ffe4; font: 11px/1.5 monospace; pointer-events: none; }
+.projection-hint { position: absolute; left: 1rem; right: 1rem; bottom: 28%; padding: .7rem; border-radius: .7rem; background: #132a22dd; color: white; text-align: center; }
+.alignment-adjust { align-self: flex-end; padding: .6rem .9rem; border-radius: .6rem; pointer-events: auto; }

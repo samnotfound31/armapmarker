@@ -16,11 +16,11 @@ export function TrackingWarning({
   return (
     <aside className="tracking-warning" role="alert">
       <div>
-        <strong>{needsRealign ? "Route alignment drifted" : "Tracking is weak"}</strong>
+        <strong>{needsRealign ? "Alignment needs a fresh anchor" : "Recovering alignment"}</strong>
         <p>
           {needsRealign
-            ? "Stop walking and align the route to the road again."
-            : "Move more slowly and keep textured road in view."}
+            ? "Point along the path and tap the ground once to re-align."
+            : "Keep the path in view. Markers are approximate while tracking recovers."}
         </p>
       </div>
       {needsRealign ? (

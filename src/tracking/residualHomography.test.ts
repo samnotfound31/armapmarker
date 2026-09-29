@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Mat3 } from "../domain/types";
 import {
+  assertVisualContinuity,
   buildSensorRotationHomography,
   computeResidualHomography,
   limitVisualResidual,
@@ -12,6 +13,15 @@ import { buildApproximateIntrinsics } from "../geometry/intrinsics";
 const IDENTITY: Mat3 = [1, 0, 0, 0, 1, 0, 0, 0, 1];
 
 describe("residual homography", () => {
+  it("rejects sudden residual scale, rotation or perspective changes relative to the last accepted transform", () => {
+    for (const candidate of [
+      [2,0,0,0,2,0,0,0,1],
+      [0,1,0,-1,0,0,0,0,1],
+      [1,0,-0.0007,0,1,0,0,0,1]
+    ] as Mat3[]) expect(() => assertVisualContinuity(candidate, IDENTITY, 1280, 720)).toThrow();
+    expect(() => assertVisualContinuity([1,0,0,0,1,0,4,-2,1], IDENTITY, 1280, 720)).not.toThrow();
+  });
+
   it("computes H_visual = H_observed * inverse(H_sensor)", () => {
     const sensor: Mat3 = [1, 0, 0, 1, 1, 0, 10, 5, 1];
     const visual: Mat3 = [1, 0, 0, 0, 1, 0, 3, -2, 1];

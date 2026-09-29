@@ -122,6 +122,9 @@ export type TrackingQuality = {
   inlierCount: number;
   inlierRatio: number;
   medianReprojectionErrorPx: number;
+  confidence?: number;
+  visualUpdate?: "initializing" | "valid" | "rejected";
+  rejectionReason?: string;
 };
 
 export type VisualCorrection = {

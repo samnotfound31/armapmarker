@@ -267,3 +267,25 @@ function interpolateFromIdentity(matrix: Mat3, weight: number): Mat3 {
     1 + (matrix[8] - 1) * weight
   ]);
 }
+
+// Validate the visual change after removing sensor motion, before bounding its
+// magnitude. An implausible measurement must be rejected, not shrunk into trust.
+export function assertVisualContinuity(candidate: Mat3, previous: Mat3, width: number, height: number): void {
+  const delta = normalizeHomography(multiplyHomographies(candidate, invertHomography(previous)));
+  const limits = {...DEFAULT_VISUAL_RESIDUAL_LIMITS, imageWidthPx: width, imageHeightPx: height};
+  assertPlausibleProjectiveMatrix(delta, limits);
+  const denominators = samplePoints(limits).map((p) => delta[2]*p.xPx + delta[5]*p.yPx + delta[8]);
+  if (Math.max(...denominators) / Math.min(...denominators) > 2.5) {
+    throw new RangeError("Visual perspective changed too quickly.");
+  }
+  const centre = transformPoint(delta,width/2,height/2);
+  const right = transformPoint(delta,width/2 + width/10,height/2);
+  const down = transformPoint(delta,width/2,height/2 + height/10);
+  const scaleX = Math.hypot(right.xPx-centre.xPx,right.yPx-centre.yPx)/(width/10);
+  const scaleY = Math.hypot(down.xPx-centre.xPx,down.yPx-centre.yPx)/(height/10);
+  if (Math.min(scaleX,scaleY) < 0.65 || Math.max(scaleX,scaleY) > 1.5 ||
+      Math.abs(Math.atan2(right.yPx-centre.yPx,right.xPx-centre.xPx)) > Math.PI/5 ||
+      Math.hypot(centre.xPx-width/2,centre.yPx-height/2) > Math.max(width,height)*0.3) {
+    throw new RangeError("Visual motion is discontinuous.");
+  }
+}
