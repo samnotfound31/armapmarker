@@ -21,7 +21,7 @@ export type RouteRenderDiagnostics = {
   visibleMarkers: number;
   geometryMarkers: number;
   renderedMarkers: number;
-  reason: "visible" | "no-route-ahead" | "invalid-transform" | "behind-camera" | "outside-viewport" | "tracking-realign";
+  reason: "visible" | "no-route-ahead" | "invalid-transform" | "behind-camera" | "outside-viewport" | "tracking-realign" | "geographic-uncertain";
 };
 
 export type RouteGeometryBuffers = {
@@ -119,7 +119,7 @@ export class RouteRenderer {
       screenWidthPx: this.screenWidthPx,
       screenHeightPx: this.screenHeightPx,
       overlayOpacity:
-        pose.quality.state === "locked"
+        pose.geographicState !== "VALID" ? 0 : pose.quality.state === "locked"
           ? 1
           : pose.quality.state === "weak"
             ? 0.5
@@ -151,11 +151,11 @@ export class RouteRenderer {
       result.projected++;
       if (screen.xPx >= 0 && screen.xPx <= this.screenWidthPx && screen.yPx >= 0 && screen.yPx <= this.screenHeightPx) result.visibleMarkers++;
     }
-    result.renderedMarkers = pose.quality.state === "realign" ? 0 : result.visibleMarkers;
+    result.renderedMarkers = pose.geographicState !== "VALID" || pose.quality.state === "realign" ? 0 : result.visibleMarkers;
     result.reason = result.routePointsAhead === 0 ? "no-route-ahead" :
       result.transformed === 0 ? "invalid-transform" : result.inFrontOfCamera === 0 ? "behind-camera" :
       result.projected === 0 ? "invalid-transform" : result.visibleMarkers === 0 ? "outside-viewport" :
-      pose.quality.state === "realign" ? "tracking-realign" : "visible";
+      pose.geographicState !== "VALID" ? "geographic-uncertain" : pose.quality.state === "realign" ? "tracking-realign" : "visible";
     return result;
   }
 

@@ -1,9 +1,14 @@
 import type { CalibrationFeed } from "../components/CalibrationScreen";
 import type { CameraIntrinsics, Mat3 } from "../domain/types";
+import type { LocationFix } from "../device/location";
+import { magneticDeclinationForLocation } from "../device/magneticDeclination";
+import { readAbsoluteCameraHeading, type AbsoluteHeadingReading, type OrientationReading } from "../device/orientation";
 import {
   buildCameraFromGroundAtLock,
-  buildEarthFromGroundAtLock,
+  buildCameraFromGroundWithEarthFrame,
+  GEOGRAPHIC_EARTH_FROM_GROUND,
   intersectImageRayWithGround,
+  w3cDeviceToEarthRotation,
   type W3cDeviceOrientation
 } from "../geometry/groundCalibration";
 import {
@@ -35,7 +40,8 @@ export type CameraImageDimensions = {
 
 export function createBrowserCalibrationRuntime(
   stream: MediaStream,
-  deliveredDimensions?: Readonly<CameraImageDimensions>
+  deliveredDimensions?: Readonly<CameraImageDimensions>,
+  location?: LocationFix
 ): BrowserCalibrationRuntime {
   const settings = stream.getVideoTracks()[0]?.getSettings();
   const imageWidthPx = deliveredDimensions?.imageWidthPx ?? settings?.width ?? 1280;
@@ -64,6 +70,7 @@ export function createBrowserCalibrationRuntime(
   void video.play().catch(() => undefined);
 
   let disposed = false;
+  const cancelled = new AbortController();
   let tracker: OpenCvTracker | null = null;
   let cameraFromGroundAtLock: ReturnType<typeof buildCameraFromGroundAtLock> | null =
     null;
@@ -83,25 +90,37 @@ export function createBrowserCalibrationRuntime(
     lastMotion = next;
   };
   window.addEventListener("deviceorientation", onMotion, true);
+  window.addEventListener("deviceorientationabsolute", onMotion, true);
 
   const feed: CalibrationFeed = {
     async captureOrientation(selectedHeight = 1.4) {
       cameraHeightMeters = selectedHeight;
-      const orientations = await collectOrientationSamples(5, 4_000);
-      const average = averageW3cOrientations(orientations);
-      const earthFromGroundAtLock = buildEarthFromGroundAtLock(average);
+      const captured = await collectOrientationSamples(5, 4_000, cancelled.signal);
+      const declination = location ? magneticDeclinationForLocation(location.point, Date.now()) : undefined;
+      const headings = captured.map((sample) => readAbsoluteCameraHeading(sample.reading, performance.now(), declination));
+      const headingMean = circularMean(headings.filter((heading) => heading.usable).map((heading) => heading.headingRad!));
+      const stable = headings.every((heading) => heading.usable && Math.abs(wrappedAngle(heading.headingRad! - headingMean)) <= Math.PI / 12);
+      const average = averageW3cOrientations(captured.map((sample, index) =>
+        stable ? headings[index]!.orientation! : sample.orientation));
+      const lastHeading = headings.at(-1)!;
+      const geographicRotation = w3cDeviceToEarthRotation(average);
+      const absoluteHeading: AbsoluteHeadingReading = stable
+        ? { ...lastHeading, headingRad: normalizeRadians(Math.atan2(-geographicRotation[6], -geographicRotation[7])),
+            accuracyDeg: Math.max(...headings.map((heading) => heading.accuracyDeg ?? 20)), orientation: average }
+        : { ...lastHeading, headingRad: null, usable: false,
+            reason: headings.find((heading) => !heading.usable)?.reason ?? "compass-unstable", orientation: undefined };
+      const earthFromGroundAtLock = GEOGRAPHIC_EARTH_FROM_GROUND;
       cameraFromGroundAtLock = rotateCameraFromGroundForScreen(
-        buildCameraFromGroundAtLock(average, cameraHeightMeters),
+        buildCameraFromGroundWithEarthFrame(average, earthFromGroundAtLock, [0, cameraHeightMeters, 0]),
         displayRotation
       );
       return {
-        samples: orientations.map((orientation) => ({
-          headingRad: orientation.alphaRad,
-          pitchRad: orientation.betaRad,
-          rollRad: orientation.gammaRad
-        })),
+        samples: stable ? headings.map((heading) => ({
+          headingRad: heading.headingRad!, pitchRad: heading.orientation!.betaRad, rollRad: heading.orientation!.gammaRad
+        })) : [],
         cameraFromGroundAtLock,
-        earthFromGroundAtLock
+        earthFromGroundAtLock,
+        absoluteHeading
       };
     },
     async scanFeatures() {
@@ -158,7 +177,9 @@ export function createBrowserCalibrationRuntime(
     dispose() {
       if (disposed) return;
       disposed = true;
+      cancelled.abort();
       window.removeEventListener("deviceorientation", onMotion, true);
+      window.removeEventListener("deviceorientationabsolute", onMotion, true);
       tracker?.dispose();
       tracker = null;
       video.srcObject = null;
@@ -168,36 +189,58 @@ export function createBrowserCalibrationRuntime(
 
 function collectOrientationSamples(
   count: number,
-  timeoutMs: number
-): Promise<W3cDeviceOrientation[]> {
+  timeoutMs: number,
+  signal: AbortSignal
+): Promise<{ reading: OrientationReading; orientation: W3cDeviceOrientation }[]> {
   return new Promise((resolve, reject) => {
-    const samples: W3cDeviceOrientation[] = [];
-    const timeout = window.setTimeout(() => {
+    const samples: { reading: OrientationReading; orientation: W3cDeviceOrientation }[] = [];
+    let usesAbsoluteSamples = false;
+    const clean = () => {
+      window.clearTimeout(timeout);
       window.removeEventListener("deviceorientation", onOrientation, true);
+      window.removeEventListener("deviceorientationabsolute", onOrientation, true);
+      signal.removeEventListener("abort", onAbort);
+    };
+    const onAbort = () => { clean(); reject(new Error("Calibration was cancelled.")); };
+    const timeout = window.setTimeout(() => {
+      clean();
       reject(new Error("Orientation samples timed out."));
     }, timeoutMs);
     const onOrientation = (event: DeviceOrientationEvent) => {
       const orientation = orientationFromEvent(event);
       if (!orientation) return;
-      samples.push(orientation);
+      const reading = { ...eventReading(event), absolute: event.absolute || event.type === "deviceorientationabsolute" };
+      const hasAbsolute = typeof reading.webkitCompassHeading === "number" || reading.absolute;
+      if (usesAbsoluteSamples && !hasAbsolute) return;
+      if (hasAbsolute && !usesAbsoluteSamples) { samples.length = 0; usesAbsoluteSamples = true; }
+      samples.push({ reading, orientation });
       if (samples.length < count) return;
-      window.clearTimeout(timeout);
-      window.removeEventListener("deviceorientation", onOrientation, true);
+      clean();
       resolve(samples);
     };
     window.addEventListener("deviceorientation", onOrientation, true);
+    window.addEventListener("deviceorientationabsolute", onOrientation, true);
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
   });
 }
 
 function orientationFromEvent(
   event: DeviceOrientationEvent
 ): W3cDeviceOrientation | null {
-  if (event.alpha === null || event.beta === null || event.gamma === null) return null;
+  if (!Number.isFinite(event.alpha) || !Number.isFinite(event.beta) || !Number.isFinite(event.gamma) ||
+      Math.abs(event.beta!) > 180 || Math.abs(event.gamma!) > 90) return null;
   return {
-    alphaRad: degreesToRadians(event.alpha),
-    betaRad: degreesToRadians(event.beta),
-    gammaRad: degreesToRadians(event.gamma)
+    alphaRad: degreesToRadians(event.alpha!),
+    betaRad: degreesToRadians(event.beta!),
+    gammaRad: degreesToRadians(event.gamma!)
   };
+}
+
+function eventReading(event: DeviceOrientationEvent): OrientationReading {
+  const compass = event as DeviceOrientationEvent & OrientationReading;
+  return { alpha: event.alpha, beta: event.beta, gamma: event.gamma, absolute: event.absolute,
+    webkitCompassHeading: compass.webkitCompassHeading, webkitCompassAccuracy: compass.webkitCompassAccuracy };
 }
 
 function averageW3cOrientations(
@@ -241,4 +284,8 @@ function wrappedAngle(value: number): number {
 
 function degreesToRadians(value: number): number {
   return (value * Math.PI) / 180;
+}
+
+function normalizeRadians(value: number): number {
+  return ((value % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
 }

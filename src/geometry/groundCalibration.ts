@@ -13,6 +13,14 @@ import {
 
 const EPSILON = 1e-9;
 
+// Geographic ground coordinates are X east, Y up, Z true north. W3C Earth
+// coordinates are X east, Y north, Z up. Columns map ground axes into Earth.
+export const GEOGRAPHIC_EARTH_FROM_GROUND: Mat3 = [
+  1, 0, 0,
+  0, 0, 1,
+  0, 1, 0
+];
+
 export type OrientationCalibrationSample = {
   headingRad: number;
   pitchRad: number;
@@ -322,7 +330,7 @@ function applyMat3ToDirection(matrix: Mat3, direction: Vec3): Vec3 {
   ];
 }
 
-function w3cDeviceToEarthRotation({
+export function w3cDeviceToEarthRotation({
   alphaRad,
   betaRad,
   gammaRad

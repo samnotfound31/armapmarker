@@ -5,6 +5,7 @@ import type {
   PoseEstimate,
   TrackingQuality,
   VisualCorrection
+  , AbsoluteHeading
 } from "../domain/types";
 import { limitVisualResidual } from "../tracking/residualHomography";
 
@@ -27,6 +28,7 @@ export type SensorPoseUpdate = {
   timestampMs: number;
   cameraFromGround: Mat4;
   orientationQuaternion: [number, number, number, number];
+  absoluteHeading?: AbsoluteHeading;
 };
 
 export type VisualPoseUpdate = VisualCorrection & {

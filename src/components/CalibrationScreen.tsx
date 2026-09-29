@@ -7,12 +7,14 @@ import { estimateDemoGroundPose } from "../calibration/demoGroundPose";
 import { buildRouteRibbon } from "../ar/routeRibbon";
 import { projectRoutePointToScreen } from "../ar/projection";
 import { PoseFusion } from "../pose/PoseFusion";
+import type { AbsoluteHeadingReading } from "../device/orientation";
 
 export type CalibrationFeed = {
   captureOrientation: (cameraHeightMeters?: 1.2 | 1.4 | 1.6) => Promise<{
     samples: readonly OrientationCalibrationSample[];
     cameraFromGroundAtLock: Mat4;
     earthFromGroundAtLock?: Mat3;
+    absoluteHeading?: AbsoluteHeadingReading;
   }>;
   scanFeatures: () => Promise<readonly ScanObservation[]>;
 };
@@ -27,6 +29,8 @@ type CalibrationScreenProps = {
   onLock: (calibration: GroundCalibration) => void;
   onBack: () => void;
   stream?: MediaStream;
+  routeBearingRad?: number;
+  actualRoutePosition?: RouteGroundPoint;
 };
 
 export function CalibrationScreen(props: CalibrationScreenProps) {
@@ -37,7 +41,6 @@ export function CalibrationScreen(props: CalibrationScreenProps) {
   const [capture, setCapture] = useState<Awaited<ReturnType<CalibrationFeed["captureOrientation"]>>>();
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
-  const [adjustment, setAdjustment] = useState(0);
 
   useEffect(() => {
     active.current = true;
@@ -67,11 +70,12 @@ export function CalibrationScreen(props: CalibrationScreenProps) {
 
   const estimate = (value: NonNullable<typeof capture>, anchor?: Vec3) => estimateDemoGroundPose({
     groundRoute, progressMeters: calibrationProgressMeters, intrinsics, imageToScreen,
-    capture: value, yawAdjustmentRad: adjustment, ...(anchor ? {anchor} : {})
+    capture: value, routeBearingRad:props.routeBearingRad, actualRoutePosition:props.actualRoutePosition,
+    ...(anchor ? {anchor} : {})
   });
   let polygons: string[] = [];
-  if (capture) {
-    try { polygons = projectedMarkers(groundRoute, estimate(capture)); }
+  if (capture?.absoluteHeading?.usable) {
+    try { const proposed=estimate(capture); if(proposed.geographicYawValidated) polygons = projectedMarkers(groundRoute, proposed); }
     catch { /* An unsafe provisional projection is not drawn. The tap explains it. */ }
   }
   const tap = async (point: ImagePixel, widthPx: number, heightPx: number) => {
@@ -85,9 +89,6 @@ export function CalibrationScreen(props: CalibrationScreenProps) {
       const anchor = props.screenPointToGround(point, {widthPx, heightPx});
       if (!anchor) throw new RangeError("Aim lower and tap visible ground a few metres ahead.");
       const calibration = estimate(fresh, anchor);
-      if (projectedMarkers(groundRoute, calibration).length === 0) {
-        throw new RangeError("Aim along the path with some ground in view, then tap again.");
-      }
       props.onLock(calibration);
     } catch (failure) {
       if (active.current) setError(failure instanceof Error ? failure.message : "Alignment could not start. Tap again.");
@@ -110,14 +111,11 @@ export function CalibrationScreen(props: CalibrationScreenProps) {
       </svg>}
     </button>
     <div className="quick-calibration-card">
-      <h2 id="calibration-title">Align route to the road</h2>
-      <p>{busy ? "Aligning…" : capture ? "Point along the path. Tap the ground once to start." : "Point toward the path. Finding the ground…"}</p>
-      <p className="status-line">Approximate alignment · Stand still for the tap</p>
+      <h2 id="calibration-title">Check the road view</h2>
+      <p>{busy ? "Checking ground…" : capture ? "Hold naturally with ground in view. Tap visible ground once, or start guidance." : "Acquiring absolute heading…"}</p>
+      <p className="status-line">{capture?.absoluteHeading?.usable ? "Geographic heading ready · Ground height is approximate" : "Heading unavailable or uncertain · AR tracers will stay hidden"}</p>
       {error && <p role="alert">{error}</p>}
-      <details><summary>Adjust direction if needed</summary>
-        <button type="button" onClick={() => setAdjustment((v) => v - Math.PI/36)}>Nudge left</button>
-        <button type="button" onClick={() => setAdjustment((v) => v + Math.PI/36)}>Nudge right</button>
-      </details>
+      <button type="button" disabled={!capture || busy} onClick={() => { if(capture) props.onLock(estimate(capture)); }}>Start guidance</button>
       <button type="button" className="text-button" onClick={props.onBack}>Back</button>
     </div>
   </section>;

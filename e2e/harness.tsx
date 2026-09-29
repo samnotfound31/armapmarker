@@ -166,7 +166,9 @@ function runtimeSnapshot(
     quality: navigation.trackingQuality,
     timestampMs
   };
-  return { pose, navigation };
+  pose.geographicState="VALID";
+  return { pose, navigation, geographic:{locationStatus:"GOOD",locationReason:"accepted",locationAccuracyMeters:5,
+    locationAgeMs:0,heading:null,headingAgeMs:null,direction:null} };
 }
 
 declare global {

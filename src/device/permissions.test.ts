@@ -25,8 +25,8 @@ describe("requestMotionPermission", () => {
         DeviceMotionEvent: { requestPermission: requestMotion }
       })
     ).resolves.toBe("prompted");
-    expect(requestOrientation).toHaveBeenCalledOnce();
-    expect(requestMotion).toHaveBeenCalledOnce();
+    expect(requestOrientation).toHaveBeenCalledExactlyOnceWith(true);
+    expect(requestMotion).toHaveBeenCalledExactlyOnceWith();
   });
 
   it("uses Android's direct event path when no prompt method exists", async () => {

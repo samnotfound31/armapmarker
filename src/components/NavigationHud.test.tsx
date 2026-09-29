@@ -4,6 +4,20 @@ import type { NavigationSnapshot } from "../navigation/navigationEngine";
 import { NavigationHud } from "./NavigationHud";
 
 describe("NavigationHud", () => {
+  it("explains geographic uncertainty independently of visually locked tracking", () => {
+    render(<NavigationHud navigation={{...snapshot(),geographicState:"WRONG_WAY"}} onExit={vi.fn()}
+      onRealign={vi.fn()} onRecalculate={vi.fn()} onKeepRoute={vi.fn()} direction="behind" />);
+    expect(screen.getByText(/walking against the route/i)).toBeVisible();
+    expect(screen.getByText(/route behind/i)).toBeVisible();
+    expect(screen.getByRole("button",{name:/recalculate/i})).toBeVisible();
+  });
+  it("keeps recalculation available for a confirmed off-route fix even without compass heading", () => {
+    const onRecalculate = vi.fn();
+    render(<NavigationHud navigation={{ ...snapshot(), offRoute: true, geographicState: "HEADING_UNCERTAIN" }}
+      onExit={vi.fn()} onRealign={vi.fn()} onRecalculate={onRecalculate} onKeepRoute={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: /recalculate route/i }));
+    expect(onRecalculate).toHaveBeenCalledOnce();
+  });
   it("shows maneuver, remaining distance, tracking quality, safety, and exit", () => {
     const onExit = vi.fn();
     render(

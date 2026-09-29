@@ -44,7 +44,7 @@ export async function completeCalibration(page: Page): Promise<void> {
   await page.getByRole("button", { name: /start ar walk/i }).click();
   await page.getByRole("button", { name: /enable camera and sensors/i }).click();
   await expect(
-    page.getByRole("heading", { name: /align route to the road/i })
+    page.getByRole("heading", { name: /check the road view/i })
   ).toBeVisible();
   await completeRoadAlignment(page);
 }

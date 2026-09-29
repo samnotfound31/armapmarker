@@ -6,9 +6,11 @@ import type {
   PoseEstimate,
   RouteGroundPoint,
   RoutePlan,
-  TrackingQuality
+  TrackingQuality,
+  AbsoluteHeading
 } from "../domain/types";
 import type { LocationFix } from "../device/location";
+import { AcceptedLocationFilter } from "../device/AcceptedLocationFilter";
 import { applyMat4ToPoint } from "../geometry/groundCalibration";
 import {
   NavigationEngine,
@@ -19,7 +21,7 @@ import {
   PoseFusion,
   type SensorPoseUpdate as FusionSensorPoseUpdate
 } from "../pose/PoseFusion";
-import { toEnu } from "../route/geo";
+import { toEnu, toRouteLocal, type RouteFrame } from "../route/geo";
 import { sampleRouteGroundPoint } from "../route/prepareRoute";
 import type { TrackerResult } from "../tracking/types";
 
@@ -29,6 +31,7 @@ export type FrameSample = {
   frame: ImageBitmap;
   timestampMs: number;
   sensorHomography: Mat3;
+  onAccepted?: () => void;
 };
 
 export type SessionSource<T> = {
@@ -57,6 +60,15 @@ export type NavigationSessionAdapters = {
 export type NavigationRuntimeSnapshot = {
   pose: PoseEstimate;
   navigation: NavigationSnapshot;
+  geographic: {
+    locationStatus: string;
+    locationReason: string;
+    locationAccuracyMeters: number | null;
+    locationAgeMs: number | null;
+    heading: AbsoluteHeading | null;
+    headingAgeMs: number | null;
+    direction: "left" | "right" | "behind" | "ahead" | null;
+  };
 };
 
 export type NavigationSessionOptions = {
@@ -70,6 +82,10 @@ export type NavigationSessionOptions = {
   onLocationAccepted?: (fix: LocationFix, progressMeters: number) => void;
   onUnavailable: (message: string) => void;
   onArrived: (snapshot: NavigationRuntimeSnapshot) => void;
+  routeFrame?: RouteFrame;
+  initialLocation?: LocationFix;
+  initialMatchUncertain?: boolean;
+  clock?: { epochNow(): number; monotonicNow(): number };
 };
 
 const INITIAL_TRACKING_QUALITY: TrackingQuality = {
@@ -87,22 +103,42 @@ export class NavigationSession {
   private active = false;
   private latestQuality = INITIAL_TRACKING_QUALITY;
   private latestNavigation: NavigationSnapshot | null = null;
+  private readonly locationFilter = new AcceptedLocationFilter();
+  private readonly clock;
+  private latestHeading: AbsoluteHeading | null;
+  private geographicOrientationAvailable: boolean;
+  private latestPosition: LocalRoutePoint | null = null;
+  private locationStatus = "REJECTED";
+  private locationReason = "awaiting-location";
+  private locationAccuracyMeters: number | null = null;
 
   constructor(private readonly options: NavigationSessionOptions) {
     this.fusion = new PoseFusion(options.calibration);
+    this.clock = options.clock ?? {
+      epochNow: () => Date.now(),
+      monotonicNow: () => performance.now()
+    };
+    this.latestHeading = options.calibration.absoluteHeading ?? null;
+    this.geographicOrientationAvailable = Boolean(options.calibration.geographicYawValidated);
     const progress = options.calibration.calibrationRouteDistanceMeters;
     this.latestNavigation = {
-      routeProgressMeters: progress, acceptedGpsProgressMeters: progress,
+      routeProgressMeters: progress,
+      acceptedGpsProgressMeters: progress,
       remainingDistanceMeters: Math.max(0, options.route.distanceMeters - progress),
       nextManeuver: selectNextManeuver(options.route.steps, progress),
-      offRoute: false, arrived: false, realignRequired: false,
-      trackingQuality: INITIAL_TRACKING_QUALITY, timestampMs: options.calibration.lockedAtMs ?? 0
+      offRoute: false,
+      arrived: false,
+      realignRequired: false,
+      trackingQuality: INITIAL_TRACKING_QUALITY,
+      timestampMs: options.calibration.lockedAtMs ?? 0,
+      geographicState: "LOCATION_UNCERTAIN"
     };
     this.engine = new NavigationEngine(
       options.localRoute,
       options.route.steps,
       options.route.distanceMeters,
-      options.calibration.calibrationRouteDistanceMeters
+      options.calibration.calibrationRouteDistanceMeters,
+      { initialMatchUncertain: options.initialMatchUncertain === true }
     );
   }
 
@@ -120,6 +156,11 @@ export class NavigationSession {
       };
       subscribe(this.options.adapters.location, (fix) => this.handleLocation(fix));
       subscribe(this.options.adapters.sensor, (update) => this.handleSensor(update));
+      const watchdog = setInterval(() => {
+        if (this.active) this.emit(this.clock.monotonicNow());
+      }, 250);
+      this.disposers.push(() => clearInterval(watchdog));
+      if (this.options.initialLocation) this.handleLocation(this.options.initialLocation);
       if (!this.active) return;
       await this.options.adapters.tracker.start({
         onResult: (result) => this.handleTrackerResult(result),
@@ -143,6 +184,15 @@ export class NavigationSession {
 
   private handleLocation(fix: LocationFix): void {
     if (!this.active) return;
+    const now = this.clock.monotonicNow();
+    const decision = this.locationFilter.accept(fix, this.clock.epochNow(), now);
+    this.locationStatus = decision.status;
+    this.locationReason = decision.reason;
+    this.locationAccuracyMeters = Number.isFinite(fix.accuracyMeters) ? fix.accuracyMeters : null;
+    if (!decision.accepted) {
+      this.emit(now);
+      return;
+    }
     const localPosition = toEnu(
       fix.point,
       this.options.enuOrigin ?? this.options.route.origin
@@ -155,49 +205,40 @@ export class NavigationSession {
         destinationOffset.eastMeters,
         destinationOffset.northMeters
       ),
-      timestampMs: fix.timestampMs,
+      timestampMs: now,
+      locationUsable: true,
+      headingReliable: this.headingUsable(now),
       trackingQuality: this.latestQuality,
       calibrationDisagreement: this.latestQuality.state === "realign"
     });
     if (!navigationUpdate.accepted) return;
     const navigation = navigationUpdate.snapshot;
+    this.latestPosition = localPosition;
     this.latestNavigation = navigation;
     this.options.onLocationAccepted?.(
       fix,
       navigation.acceptedGpsProgressMeters
     );
-    const routePosition = sampleRouteGroundPoint(
-      this.options.groundRoute,
-      navigation.routeProgressMeters
+    const frame = this.options.routeFrame ?? inferRouteFrame(
+      this.options.localRoute,
+      this.options.groundRoute
     );
+    const actualRoutePosition = toRouteLocal(localPosition, frame);
     const groundPosition = applyMat4ToPoint(
       this.options.calibration.groundFromRoute,
-      [routePosition.rightMeters, routePosition.upMeters, routePosition.forwardMeters]
-    );
-    const calibrationRoutePosition = sampleRouteGroundPoint(
-      this.options.groundRoute,
-      this.options.calibration.calibrationRouteDistanceMeters
-    );
-    const calibrationGroundPosition = applyMat4ToPoint(
-      this.options.calibration.groundFromRoute,
-      [
-        calibrationRoutePosition.rightMeters,
-        calibrationRoutePosition.upMeters,
-        calibrationRoutePosition.forwardMeters
-      ]
+      [actualRoutePosition.rightMeters, 0, actualRoutePosition.forwardMeters]
     );
     this.fusion.updateGps({
-      timestampMs: fix.timestampMs,
+      timestampMs: now,
       routeProgressMeters: navigation.routeProgressMeters,
       cameraPositionGroundMeters: [
-        groundPosition[0] - calibrationGroundPosition[0],
-        groundPosition[1] - calibrationGroundPosition[1] +
-          this.options.calibration.cameraHeightMeters,
-        groundPosition[2] - calibrationGroundPosition[2]
+        groundPosition[0],
+        this.options.calibration.cameraHeightMeters,
+        groundPosition[2]
       ]
     });
-    const snapshot = this.emit(fix.timestampMs);
-    if (navigation.arrived) {
+    const snapshot = this.emit(now);
+    if (navigation.arrived && navigation.geographicState !== "ROUTE_MATCH_UNCERTAIN") {
       this.options.onArrived(snapshot);
       this.stop();
     }
@@ -205,8 +246,12 @@ export class NavigationSession {
 
   private handleSensor(update: SensorPoseUpdate): void {
     if (!this.active) return;
+    if (update.absoluteHeading) {
+      this.latestHeading = update.absoluteHeading;
+      if (update.absoluteHeading.usable) this.geographicOrientationAvailable = true;
+    }
     if (this.fusion.updateSensor(update) && this.latestNavigation) {
-      this.emit(update.timestampMs);
+      this.emit(this.clock.monotonicNow());
     }
   }
 
@@ -215,11 +260,12 @@ export class NavigationSession {
       sample.frame.close();
       return;
     }
-    this.options.adapters.tracker.submitFrame(
+    const accepted = this.options.adapters.tracker.submitFrame(
       sample.frame,
       sample.timestampMs,
       sample.sensorHomography
     );
+    if (accepted) sample.onAccepted?.();
   }
 
   private handleTrackerResult(result: TrackerResult): void {
@@ -233,7 +279,7 @@ export class NavigationSession {
         quality: result.quality
       });
     }
-    if (this.latestNavigation) this.emit(result.timestampMs);
+    if (this.latestNavigation) this.emit(this.clock.monotonicNow());
   }
 
   private handleUnavailable(message: string): void {
@@ -246,19 +292,82 @@ export class NavigationSession {
     if (!this.latestNavigation) {
       throw new Error("Navigation state is unavailable before the first location fix.");
     }
-    const snapshot = {
+    const freshness = this.locationFilter.freshness(timestampMs);
+    const locationUsable = freshness.usable && this.locationStatus === "GOOD";
+    const headingReliable = this.headingUsable(timestampMs);
+    const availability = this.engine.setGeographicAvailability({locationUsable,headingReliable},timestampMs);
+    if (availability) this.latestNavigation = availability;
+    const geographicState = !locationUsable
+      ? "LOCATION_UNCERTAIN"
+      : this.latestNavigation.geographicState ?? "ROUTE_MATCH_UNCERTAIN";
+    const snapshot: NavigationRuntimeSnapshot = {
       pose: {
         ...this.fusion.snapshot(timestampMs),
-        quality: this.latestQuality
+        quality: this.latestQuality,
+        geographicState
       },
       navigation: {
         ...this.latestNavigation,
-        trackingQuality: this.latestQuality
+        trackingQuality: this.latestQuality,
+        geographicState
+      },
+      geographic: {
+        locationStatus: freshness.usable ? this.locationStatus : "REJECTED",
+        locationReason: freshness.usable ? this.locationReason : "stale-location",
+        locationAccuracyMeters: this.locationAccuracyMeters,
+        locationAgeMs: freshness.ageMs,
+        heading: this.latestHeading,
+        headingAgeMs: this.latestHeading
+          ? Math.max(0, timestampMs - this.latestHeading.timestampMs)
+          : null,
+        direction: this.routeDirection()
       }
     };
     this.options.onUpdate(snapshot);
     return snapshot;
   }
+
+  private headingUsable(now: number): boolean {
+    const heading = this.latestHeading;
+    return Boolean(this.geographicOrientationAvailable && heading?.usable &&
+      heading.headingRad !== null && now >= heading.timestampMs && now-heading.timestampMs <= 2_000);
+  }
+
+  private routeDirection(): "left" | "right" | "behind" | "ahead" | null {
+    const now = this.clock.monotonicNow();
+    const heading = this.latestHeading;
+    if (!this.latestPosition || !this.latestNavigation || !heading ||
+      heading.headingRad === null || !this.headingUsable(now)) return null;
+    const future = sampleRouteGroundPoint(
+      this.options.groundRoute,
+      this.latestNavigation.routeProgressMeters + 8
+    );
+    const world = applyMat4ToPoint(this.options.calibration.groundFromRoute, [
+      future.rightMeters, 0, future.forwardMeters
+    ]);
+    const camera = this.fusion.snapshot(now).cameraPositionGroundMeters;
+    const bearing = Math.atan2(world[0] - camera[0], world[2] - camera[2]);
+    const error = Math.atan2(
+      Math.sin(bearing - heading.headingRad),
+      Math.cos(bearing - heading.headingRad)
+    );
+    return Math.abs(error) > Math.PI * 0.65
+      ? "behind"
+      : error > Math.PI / 6
+        ? "right"
+        : error < -Math.PI / 6
+          ? "left"
+          : "ahead";
+  }
+}
+
+function inferRouteFrame(local: readonly LocalRoutePoint[], ground: readonly RouteGroundPoint[]): RouteFrame {
+  const a=local[0]!,b=local[1]!,g=ground[0]!,h=ground[1]!;
+  const bearing=Math.atan2(b.eastMeters-a.eastMeters,b.northMeters-a.northMeters)-
+    Math.atan2(h.rightMeters-g.rightMeters,h.forwardMeters-g.forwardMeters);
+  const c=Math.cos(bearing),s=Math.sin(bearing);
+  return {tangentBearingRad:bearing,origin:{eastMeters:a.eastMeters-g.rightMeters*c-g.forwardMeters*s,
+    northMeters:a.northMeters+g.rightMeters*s-g.forwardMeters*c,upMeters:a.upMeters-g.upMeters}};
 }
 
 function errorMessage(error: unknown, fallback: string): string {

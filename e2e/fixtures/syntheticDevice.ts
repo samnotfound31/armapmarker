@@ -15,13 +15,22 @@ export async function installSyntheticDevice(page: Page): Promise<void> {
     const state = {
       cameraCalls: 0, orientationPrompts: 0, motionPrompts: 0,
       permissionsWithoutGesture: 0, watches: new Map<number, number>(),
-      streams: [] as MediaStream[], textured: true, overlayPixels: 0, pitch: 80, roll: 0
+      streams: [] as MediaStream[], textured: true, overlayPixels: 0,
+      pitch: 80, roll: 0, headingDeg: 0, headingAvailable: true,
+      latitude: 20.353, longitude: 85.819, accuracyMeters: 15, fixAgeMs: 0
     };
     Object.assign(window, { __SYNTHETIC_DEVICE__: state });
     // Observe actual overlay pixels immediately after drawing (the default
     // framebuffer need not be preserved between frames). Never sample video.
-    const drawElements = WebGL2RenderingContext.prototype.drawElements;
     let lastRead = 0;
+    const clear = WebGL2RenderingContext.prototype.clear;
+    WebGL2RenderingContext.prototype.clear = function(...args) {
+      clear.apply(this, args);
+      if (this.canvas instanceof HTMLCanvasElement && this.canvas.classList.contains("ar-overlay") && performance.now() - lastRead > 450) {
+        state.overlayPixels = 0;
+      }
+    };
+    const drawElements = WebGL2RenderingContext.prototype.drawElements;
     WebGL2RenderingContext.prototype.drawElements = function(...args) {
       drawElements.apply(this, args);
       if (!(this.canvas instanceof HTMLCanvasElement) || !this.canvas.classList.contains("ar-overlay") || performance.now() - lastRead < 250) return;
@@ -30,15 +39,19 @@ export async function installSyntheticDevice(page: Page): Promise<void> {
       const pixels = new Uint8Array(this.drawingBufferWidth * this.drawingBufferHeight * 4);
       this.readPixels(0,0,this.drawingBufferWidth,this.drawingBufferHeight,this.RGBA,this.UNSIGNED_BYTE,pixels);
       let green = 0;
-      for (let i=0;i<pixels.length;i+=16) if (pixels[i+1]! > pixels[i]! * 1.5 && pixels[i+3]! > 20) green++;
+      for (let i=0;i<pixels.length;i+=16) {
+        if (pixels[i+1]! > pixels[i]! * 1.5 && pixels[i+3]! > 20) {
+          green++;
+        }
+      }
       state.overlayPixels = green;
       });
     };
     const fix = () => ({
       coords: {
-        latitude: 20.353, longitude: 85.819, accuracy: 15,
+        latitude: state.latitude, longitude: state.longitude, accuracy: state.accuracyMeters,
         altitude: 42, altitudeAccuracy: 8, heading: 0, speed: 0
-      }, timestamp: Date.now()
+      }, timestamp: Date.now() - state.fixAgeMs
     } as GeolocationPosition);
     navigator.geolocation.getCurrentPosition = (success) => success(fix());
     navigator.geolocation.watchPosition = (success) => {
@@ -64,7 +77,13 @@ export async function installSyntheticDevice(page: Page): Promise<void> {
     window.setInterval(() => {
       if (!state.orientationPrompts) return;
       const event = new Event("deviceorientation");
-      Object.assign(event, { alpha: 0, beta: state.pitch, gamma: state.roll, absolute: true });
+      Object.assign(event, {
+        alpha: 0, beta: state.pitch, gamma: state.roll, absolute: false,
+        ...(state.headingAvailable ? {
+          webkitCompassHeading: state.headingDeg,
+          webkitCompassAccuracy: 5
+        } : {})
+      });
       window.dispatchEvent(event);
     }, 50);
     Object.getPrototypeOf(navigator.mediaDevices).getUserMedia = async () => {
@@ -122,6 +141,12 @@ declare global {
       overlayPixels: number;
       pitch: number;
       roll: number;
+      headingDeg: number;
+      headingAvailable: boolean;
+      latitude: number;
+      longitude: number;
+      accuracyMeters: number;
+      fixAgeMs: number;
     };
   }
 }

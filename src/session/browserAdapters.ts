@@ -22,6 +22,9 @@ import type {
   SessionTracker
 } from "./NavigationSession";
 import { buildSensorRotationHomography } from "../tracking/residualHomography";
+import { readAbsoluteCameraHeading } from "../device/orientation";
+import { magneticDeclinationForLocation } from "../device/magneticDeclination";
+import { GEOGRAPHIC_EARTH_FROM_GROUND } from "../geometry/groundCalibration";
 
 const IDENTITY_MAT3: Mat3 = [1, 0, 0, 0, 1, 0, 0, 0, 1];
 
@@ -32,7 +35,6 @@ export class SensorFrameHomography {
 
   next(currentCameraRotation: Mat3): Mat3 {
     const previous = this.previousCameraRotation;
-    this.previousCameraRotation = currentCameraRotation;
     return previous
       ? buildSensorRotationHomography(
           previous,
@@ -41,18 +43,23 @@ export class SensorFrameHomography {
         )
       : IDENTITY_MAT3;
   }
+
+  commit(acceptedCameraRotation: Mat3): void {
+    this.previousCameraRotation = acceptedCameraRotation;
+  }
 }
 
 export function createBrowserNavigationAdapters(
   stream: MediaStream,
-  calibration: GroundCalibration
+  calibration: GroundCalibration,
+  readLocation?: () => LocationFix | undefined
 ): NavigationSessionAdapters {
   let latestCameraRotation: Mat3 | null = null;
   return {
     location: createBrowserLocationSource(),
     sensor: createBrowserSensorSource(calibration, (rotation) => {
       latestCameraRotation = rotation;
-    }),
+    }, readLocation),
     frames: createBrowserFrameSource(
       stream,
       calibration,
@@ -85,7 +92,13 @@ function createBrowserLocationSource(): NavigationSessionAdapters["location"] {
             timestampMs: position.timestamp
           });
         },
-        (error) => onError?.(locationErrorMessage(error)),
+        // A transient GPS timeout/unavailable result does not invalidate the
+        // session. Its freshness watchdog downgrades geographic guidance.
+        (error) => {
+          if (error.code === error.PERMISSION_DENIED) {
+            onError?.(locationErrorMessage(error));
+          }
+        },
         { enableHighAccuracy: true, maximumAge: 1_000, timeout: 8_000 }
       );
       return () => geolocation.clearWatch(watchId);
@@ -95,7 +108,8 @@ function createBrowserLocationSource(): NavigationSessionAdapters["location"] {
 
 function createBrowserSensorSource(
   calibration: GroundCalibration,
-  onCameraRotation: (rotation: Mat3) => void
+  onCameraRotation: (rotation: Mat3) => void,
+  readLocation?: () => LocationFix | undefined
 ): NavigationSessionAdapters["sensor"] {
   return {
     subscribe(listener, onError) {
@@ -104,18 +118,34 @@ function createBrowserSensorSource(
         onError?.("A fixed orientation frame is unavailable. Re-align the route.");
         return () => undefined;
       }
+      let latestAbsoluteSampleMs = Number.NEGATIVE_INFINITY;
       const onOrientation = (event: DeviceOrientationEvent) => {
-        if (event.alpha === null || event.beta === null || event.gamma === null) return;
         try {
+          const now = performance.now();
+          const compass = (event as DeviceOrientationEvent & {
+            webkitCompassHeading?: number;
+          }).webkitCompassHeading;
+          const relativeOnly = event.type !== "deviceorientationabsolute" &&
+            !event.absolute && typeof compass !== "number";
+          // Some browsers send relative and absolute streams together. A fresh
+          // absolute reading keeps its geographic authority until it expires.
+          if (relativeOnly && now - latestAbsoluteSampleMs <= 2_000) return;
+          const fix = readLocation?.();
+          const declination = fix ? magneticDeclinationForLocation(fix.point, Date.now()) : undefined;
+          const heading = readAbsoluteCameraHeading(event, now, declination);
+          if (heading.usable) latestAbsoluteSampleMs = now;
+          if (!heading.usable || !heading.orientation) {
+            listener({timestampMs:now,cameraFromGround:calibration.cameraFromGroundAtLock,
+              orientationQuaternion:quaternionFromCameraMatrix(calibration.cameraFromGroundAtLock),absoluteHeading:heading});
+            return;
+          }
           const orientation: W3cDeviceOrientation = {
-            alphaRad: degreesToRadians(event.alpha),
-            betaRad: degreesToRadians(event.beta),
-            gammaRad: degreesToRadians(event.gamma)
+            ...heading.orientation
           };
           const cameraFromGround = rotateCameraFromGroundForScreen(
             buildCameraFromGroundWithEarthFrame(
               orientation,
-              earthFromGround,
+              GEOGRAPHIC_EARTH_FROM_GROUND,
               [0, calibration.cameraHeightMeters, 0]
             ),
             resolveDisplayRotation(
@@ -128,16 +158,21 @@ function createBrowserSensorSource(
           );
           onCameraRotation(cameraRotation(cameraFromGround));
           listener({
-            timestampMs: event.timeStamp || performance.now(),
+            timestampMs: now,
             cameraFromGround,
-            orientationQuaternion: quaternionFromCameraMatrix(cameraFromGround)
+            orientationQuaternion: quaternionFromCameraMatrix(cameraFromGround),
+            absoluteHeading: heading
           });
         } catch (error) {
           onError?.(error instanceof Error ? error.message : "Orientation update failed.");
         }
       };
       window.addEventListener("deviceorientation", onOrientation, true);
-      return () => window.removeEventListener("deviceorientation", onOrientation, true);
+      window.addEventListener("deviceorientationabsolute", onOrientation as EventListener, true);
+      return () => {
+        window.removeEventListener("deviceorientation", onOrientation, true);
+        window.removeEventListener("deviceorientationabsolute", onOrientation as EventListener, true);
+      };
     }
   };
 }
@@ -180,7 +215,9 @@ function createBrowserFrameSource(
               currentCameraRotation
                 ? sensorFrames.next(currentCameraRotation)
                 : IDENTITY_MAT3;
-            listener({ frame, timestampMs, sensorHomography });
+            listener({ frame, timestampMs, sensorHomography,
+              onAccepted: () => { if (currentCameraRotation) sensorFrames.commit(currentCameraRotation); }
+            });
           }
         } catch (error) {
           if (!stopped) {
@@ -294,8 +331,4 @@ function locationErrorMessage(error: GeolocationPositionError): string {
   if (error.code === error.PERMISSION_DENIED) return "Location permission was denied.";
   if (error.code === error.TIMEOUT) return "Location update timed out outdoors.";
   return "Live location is unavailable.";
-}
-
-function degreesToRadians(value: number): number {
-  return (value * Math.PI) / 180;
 }

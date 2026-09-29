@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { routePlanSchema, routeRequestSchema } from "./routeSchemas";
+import { routeApiResponseSchema, routePlanSchema, routeRequestSchema } from "./routeSchemas";
 
 describe("routeRequestSchema", () => {
   it("accepts a bounded origin and selected destination", () => {
@@ -26,6 +26,26 @@ describe("routeRequestSchema", () => {
 });
 
 describe("routePlanSchema", () => {
+  it("retains client-derived maneuver anchors without changing the API response contract", () => {
+    const route = {
+      origin: { lat: 0, lng: 0 },
+      destination: { lat: 0.0001, lng: 0.0001, name: "Museum" },
+      encodedPolyline: "??S?", distanceMeters: 20, durationSeconds: 20,
+      steps: [{
+        instruction: "Turn right", maneuver: "TURN_RIGHT", distanceMeters: 10,
+        polyline: "S?S?", routeProgressMeters: 11.13
+      }]
+    };
+
+    expect(routePlanSchema.parse(route).steps[0]?.routeProgressMeters).toBe(11.13);
+    expect(() => routeApiResponseSchema.parse({
+      ...route, destination: { lat: 0.0001, lng: 0.0001 }
+    })).toThrow();
+    expect(() => routePlanSchema.parse({
+      ...route, steps: [{ ...route.steps[0]!, routeProgressMeters: -1 }]
+    })).toThrow();
+  });
+
   it("rejects a malformed route returned to the browser", () => {
     expect(() =>
       routePlanSchema.parse({

@@ -7,6 +7,7 @@ type NavigationHudProps = {
   onRealign: () => void;
   onRecalculate: () => void;
   onKeepRoute: () => void;
+  direction?: "left" | "right" | "behind" | "ahead" | null;
 };
 
 export function NavigationHud({
@@ -14,7 +15,8 @@ export function NavigationHud({
   onExit,
   onRealign,
   onRecalculate,
-  onKeepRoute
+  onKeepRoute,
+  direction
 }: NavigationHudProps) {
   const maneuver = navigation.nextManeuver;
   return (
@@ -36,7 +38,7 @@ export function NavigationHud({
       </header>
 
       <p className={`tracking-chip is-${navigation.trackingQuality.state}`}>
-        Tracking {navigation.trackingQuality.state}
+        Visual tracking {navigation.trackingQuality.state}
       </p>
 
       <button type="button" className="alignment-adjust" onClick={onRealign}>Adjust alignment</button>
@@ -47,7 +49,18 @@ export function NavigationHud({
         onRealign={onRealign}
       />
 
-      {navigation.offRoute ? (
+      {direction && direction !== "ahead" && navigation.geographicState === "VALID" ?
+        <p className="tracking-chip" aria-live="polite">{direction === "left" ? "← Route left" : direction === "right" ? "→ Route right" : "↶ Route behind — turn around"}</p> : null}
+
+      {navigation.geographicState && navigation.geographicState !== "VALID" ? (
+        <aside className="off-route-warning" role="alert">
+          <strong>{geographicMessage(navigation.geographicState)}</strong>
+          <p>AR tracers are paused until geographic guidance is reliable.</p>
+          {direction === "behind" && navigation.geographicState === "WRONG_WAY" ? <p>↶ Route behind — turn around</p> : null}
+          {(navigation.offRoute || ["OFF_ROUTE", "DEVIATED", "WRONG_WAY", "ROUTE_MATCH_UNCERTAIN"].includes(navigation.geographicState)) &&
+            <button type="button" onClick={onRecalculate}>Recalculate route</button>}
+        </aside>
+      ) : navigation.offRoute ? (
         <aside className="off-route-warning" role="alert">
           <strong>You appear to be off the walking route.</strong>
           <div>
@@ -64,6 +77,18 @@ export function NavigationHud({
       <p className="walking-safety-label">Walking only · Stay aware of traffic</p>
     </div>
   );
+}
+
+function geographicMessage(state: NonNullable<NavigationSnapshot["geographicState"]>): string {
+  switch(state) {
+    case "LOCATION_UNCERTAIN": return "Location uncertain — wait for an accurate outdoor GPS fix.";
+    case "HEADING_UNCERTAIN": return "Heading uncertain — move away from metal and calibrate the compass.";
+    case "ROUTE_MATCH_UNCERTAIN": return "Route position uncertain — nearby paths cannot be distinguished.";
+    case "WRONG_WAY": return "You are walking against the route.";
+    case "DEVIATED": return "You appear to have missed the turn or left the intended path.";
+    case "OFF_ROUTE": return "You appear to be off the walking route.";
+    case "VALID": return "Geographic guidance ready.";
+  }
 }
 
 function maneuverIcon(maneuver?: string): string {

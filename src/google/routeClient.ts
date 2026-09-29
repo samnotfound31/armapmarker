@@ -1,4 +1,5 @@
 import type { Destination, GeoPoint, RoutePlan } from "../domain/types";
+import { normalizeRouteGeometry } from "../route/polyline";
 import {
   routeApiResponseSchema,
   routePlanSchema,
@@ -57,14 +58,14 @@ export async function requestWalkingRoute(
   }
 
   const apiRoute = routeApiResponseSchema.parse(await response.json());
-  return routePlanSchema.parse({
+  return normalizeRouteGeometry(routePlanSchema.parse({
     ...apiRoute,
     destination: {
       ...apiRoute.destination,
       name: input.destination.name,
       placeId: input.destination.placeId
     }
-  });
+  }));
 }
 
 async function readError(

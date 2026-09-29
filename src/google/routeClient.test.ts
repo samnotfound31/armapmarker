@@ -1,3 +1,4 @@
+import { encode } from "@googlemaps/polyline-codec";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Destination } from "../domain/types";
 import { requestWalkingRoute } from "./routeClient";
@@ -12,7 +13,7 @@ const destination: Destination = {
 const apiRoute = {
   origin: { lat: 22.57, lng: 88.36 },
   destination: { lat: 22.58, lng: 88.37 },
-  encodedPolyline: "encoded-route",
+  encodedPolyline: encode([[22.57, 88.36], [22.58, 88.37]]),
   distanceMeters: 1200,
   durationSeconds: 932,
   steps: [
@@ -20,7 +21,7 @@ const apiRoute = {
       instruction: "Turn left",
       maneuver: "TURN_LEFT",
       distanceMeters: 200,
-      polyline: "encoded-step"
+      polyline: encode([[22.57, 88.36], [22.58, 88.37]])
     }
   ]
 };
@@ -83,5 +84,32 @@ describe("requestWalkingRoute", () => {
         retryable: true
       })
     );
+  });
+
+  it("returns maneuver anchors on the same geometry distance reference as navigation", async () => {
+    const points: [number, number][] = [[0, 0], [0.00018, 0], [0.00018, 0.00018]];
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      origin: { lat: 0, lng: 0 },
+      destination: { lat: 0.00018, lng: 0.00018 },
+      encodedPolyline: encode(points), distanceMeters: 45, durationSeconds: 30,
+      steps: [
+        {
+          instruction: "Continue", maneuver: "STRAIGHT", distanceMeters: 23,
+          polyline: encode(points.slice(0, 2))
+        },
+        {
+          instruction: "Turn right", maneuver: "TURN_RIGHT", distanceMeters: 22,
+          polyline: encode(points.slice(1))
+        }
+      ]
+    }), { status: 200 })));
+
+    const route = await requestWalkingRoute({
+      origin: { lat: 0, lng: 0 },
+      destination: { ...destination, location: { lat: 0.00018, lng: 0.00018 } }
+    }, new AbortController().signal);
+
+    expect(route.distanceMeters).toBeCloseTo(40.0750167, 5);
+    expect(route.steps[1]?.routeProgressMeters).toBeCloseTo(20.0375083, 5);
   });
 });

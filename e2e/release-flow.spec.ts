@@ -52,13 +52,13 @@ test("real MVP runtime completes search, route, calibration, tracking, re-align 
   await page.getByRole("button", { name: "Start AR walk" }).click();
   expect(await page.evaluate(() => window.__SYNTHETIC_DEVICE__.cameraCalls)).toBe(0);
   await page.getByRole("button", { name: "Enable camera and sensors" }).click();
-  await expect(page.getByRole("heading", { name: "Align route to the road" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Check the road view" })).toBeVisible();
   expect(await page.evaluate(() => {
     const state = window.__SYNTHETIC_DEVICE__;
     return [state.cameraCalls, state.orientationPrompts, state.motionPrompts, state.permissionsWithoutGesture];
   })).toEqual([1, 1, 1, 0]);
   await alignActualCalibration(page);
-  await expect(page.getByText("Tracking locked", { exact: true })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText("Visual tracking locked", { exact: true })).toBeVisible({ timeout: 30_000 });
   const videoReady = await page.getByLabel("Rear camera view").evaluate((element) => {
     const video = element as HTMLVideoElement;
     return video.videoWidth > 0 && video.videoHeight > 0 && video.readyState >= 2;
@@ -71,11 +71,11 @@ test("real MVP runtime completes search, route, calibration, tracking, re-align 
   await expect(page.getByLabel("AR diagnostics")).toContainText(/Visible markers: [1-9]/);
   // A brief feature loss leaves the real marker geometry drawn and recovers.
   await page.evaluate(() => { window.__SYNTHETIC_DEVICE__.textured = false; });
-  await expect(page.getByText("Tracking weak", {exact:true})).toBeVisible();
+  await expect(page.getByText("Visual tracking weak", {exact:true})).toBeVisible();
   await expect(page.getByLabel("AR diagnostics")).toContainText(/Rendered: [1-9]/);
   expect(await page.evaluate(() => window.__SYNTHETIC_DEVICE__.overlayPixels)).toBeGreaterThan(20);
   await page.evaluate(() => { window.__SYNTHETIC_DEVICE__.textured = true; });
-  await expect(page.getByText("Tracking locked", {exact:true})).toBeVisible();
+  await expect(page.getByText("Visual tracking locked", {exact:true})).toBeVisible();
   await page.evaluate(() => { window.__SYNTHETIC_DEVICE__.pitch = 77; window.__SYNTHETIC_DEVICE__.roll = 2; });
   await expect(page.getByLabel("AR diagnostics")).toContainText(/Rendered: [1-9]/);
   // Sustained feature loss eventually offers the one-tap fallback.
@@ -83,10 +83,10 @@ test("real MVP runtime completes search, route, calibration, tracking, re-align 
   await page.evaluate(() => { window.__SYNTHETIC_DEVICE__.textured = false; });
   await expect(page.getByRole("button", { name: "Re-align", exact: true })).toBeVisible({ timeout: 30_000 });
   await page.getByRole("button", { name: "Re-align", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Align route to the road" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Check the road view" })).toBeVisible();
   await page.evaluate(() => { window.__SYNTHETIC_DEVICE__.textured = true; });
   await alignActualCalibration(page);
-  await expect(page.getByText("Tracking locked", { exact: true })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText("Visual tracking locked", { exact: true })).toBeVisible({ timeout: 30_000 });
   await page.getByRole("button", { name: "Exit", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Where are you walking?" })).toBeVisible();
   expect(await page.evaluate(() => ({

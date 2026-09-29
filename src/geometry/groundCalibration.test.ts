@@ -8,6 +8,7 @@ import {
   buildCameraFromGroundAtLock,
   buildCameraFromGroundWithEarthFrame,
   buildEarthFromGroundAtLock,
+  GEOGRAPHIC_EARTH_FROM_GROUND,
   fitRouteToGroundTransform,
   intersectImageRayWithGround,
   intersectRayWithGroundPlane,
@@ -55,6 +56,21 @@ describe("ground intersection", () => {
       0,
       expect.closeTo(1.4 / ((810 - 540) / 960))
     ]);
+  });
+});
+
+describe("geographic ground frame", () => {
+  it.each([
+    { alphaRad: 0, depth: 5, horizontal: 0 },
+    { alphaRad: -Math.PI / 2, depth: 0, horizontal: -5 },
+    { alphaRad: Math.PI, depth: -5, horizontal: 0 }
+  ])("retains a northbound route when camera yaw is $alphaRad", ({ alphaRad, depth, horizontal }) => {
+    const camera = buildCameraFromGroundWithEarthFrame({
+      alphaRad, betaRad: Math.PI / 2, gammaRad: 0
+    }, GEOGRAPHIC_EARTH_FROM_GROUND, [0, 1.4, 0]);
+    const point = applyMat4ToPoint(camera, [0, 0, 5]);
+    expect(point[0]).toBeCloseTo(horizontal);
+    expect(point[2]).toBeCloseTo(depth);
   });
 });
 

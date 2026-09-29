@@ -28,7 +28,7 @@ export class ArPermissionError extends Error {
 
 type PermissionResult = "granted" | "denied";
 type PermissionEventConstructor = {
-  requestPermission?: () => Promise<PermissionResult>;
+  requestPermission?: (absolute?: boolean) => Promise<PermissionResult>;
 };
 
 export type MotionPermissionEnvironment = {
@@ -83,7 +83,9 @@ export function requestMotionPermission(
   }
 
   const prompts = [
-    environment.DeviceOrientationEvent?.requestPermission?.(),
+    // The absolute request includes magnetometer permission. Legacy Safari
+    // ignores the extra argument and keeps its existing gesture prompt.
+    environment.DeviceOrientationEvent?.requestPermission?.(true),
     environment.DeviceMotionEvent?.requestPermission?.()
   ].filter((prompt): prompt is Promise<PermissionResult> => prompt !== undefined);
 

@@ -18,12 +18,151 @@ import {
 } from "./NavigationSession";
 
 describe("NavigationSession", () => {
+  it("keeps an ambiguous initial parallel-leg match geographically uncertain", async () => {
+    const fake = createAdapters();
+    const onUpdate = vi.fn();
+    const route = routePlan();
+    route.origin = { lat: 0, lng: 0 };
+    route.distanceMeters = 206;
+    const local: LocalRoutePoint[] = [
+      { eastMeters: 0, northMeters: 0, upMeters: 0, routeDistanceMeters: 0 },
+      { eastMeters: 0, northMeters: 100, upMeters: 0, routeDistanceMeters: 100 },
+      { eastMeters: 6, northMeters: 100, upMeters: 0, routeDistanceMeters: 106 },
+      { eastMeters: 6, northMeters: 0, upMeters: 0, routeDistanceMeters: 206 }
+    ];
+    const ground = local.map((point) => ({
+      rightMeters: point.eastMeters, upMeters: 0,
+      forwardMeters: point.northMeters, routeDistanceMeters: point.routeDistanceMeters
+    }));
+    const lock = calibration();
+    lock.calibrationRouteDistanceMeters = 30;
+    lock.geographicYawValidated = true;
+    lock.absoluteHeading = {
+      headingRad: 0, accuracyDeg: 5, source: "webkit-compass",
+      usable: true, reason: "validated", timestampMs: 1000
+    };
+    const session = new NavigationSession({
+      route, localRoute: local, groundRoute: ground, calibration: lock,
+      routeFrame: { origin: { eastMeters: 0, northMeters: 0, upMeters: 0 }, tangentBearingRad: 0 },
+      initialMatchUncertain: true,
+      clock: fake.clock, adapters: fake.adapters, onUpdate,
+      onUnavailable: vi.fn(), onArrived: vi.fn()
+    });
+    await session.start();
+    fake.emitLocation({
+      point: {
+        lat: 30 / 6378137 * 180 / Math.PI,
+        lng: 2.9 / 6378137 * 180 / Math.PI
+      },
+      accuracyMeters: 5,
+      timestampMs: TEST_EPOCH + 1000
+    });
+    expect(onUpdate.mock.lastCall![0].pose.geographicState).toBe("ROUTE_MATCH_UNCERTAIN");
+    expect(onUpdate.mock.lastCall![0].navigation.acceptedGpsProgressMeters).toBeCloseTo(30);
+    session.stop();
+  });
+
+  it("hides guidance without absolute heading and restores it after a valid sensor reading", async () => {
+    const fake=createAdapters(); const onUpdate=vi.fn(); const lock=calibration();
+    lock.geographicYawValidated=false;
+    const session=new NavigationSession({route:routePlan(),localRoute:localRoute(),groundRoute:groundRoute(),calibration:lock,
+      clock:fake.clock,adapters:fake.adapters,onUpdate,onUnavailable:vi.fn(),onArrived:vi.fn()});
+    await session.start(); fake.emitLocation(fix(22.57,1000));
+    expect(onUpdate.mock.lastCall![0].pose.geographicState).toBe("HEADING_UNCERTAIN");
+    fake.emitSensor({timestampMs:1001,cameraFromGround:IDENTITY_MAT4,orientationQuaternion:[0,0,0,1],
+      absoluteHeading:{headingRad:0,accuracyDeg:5,source:"webkit-compass",usable:true,reason:"validated",timestampMs:1000}});
+    expect(onUpdate.mock.lastCall![0].pose.geographicState).toBe("VALID");
+    fake.emitSensor({timestampMs:1002,cameraFromGround:IDENTITY_MAT4,orientationQuaternion:[0,0,0,1],
+      absoluteHeading:{headingRad:null,source:"unavailable",usable:false,reason:"compass-invalid",timestampMs:1000}});
+    expect(onUpdate.mock.lastCall![0].pose.geographicState).toBe("HEADING_UNCERTAIN");
+    session.stop();
+  });
+
+  it("shows confirmed off-route state even when absolute heading is unavailable", async () => {
+    const fake = createAdapters();
+    const onUpdate = vi.fn();
+    const east25Meters = 25 / (6378137 * Math.cos(22.57 * Math.PI / 180)) * 180 / Math.PI;
+    const session = new NavigationSession({
+      route: routePlan(), localRoute: localRoute(), groundRoute: groundRoute(),
+      calibration: calibration(), clock: fake.clock, adapters: fake.adapters,
+      onUpdate, onUnavailable: vi.fn(), onArrived: vi.fn()
+    });
+    await session.start();
+    for (const timestampMs of [1000, 2000, 3000]) {
+      fake.emitLocation({ point: { lat: 22.5701, lng: 88.36 + east25Meters },
+        accuracyMeters: 5, timestampMs: TEST_EPOCH + timestampMs });
+    }
+    expect(onUpdate.mock.lastCall![0].navigation).toMatchObject({ offRoute: true, geographicState: "OFF_ROUTE" });
+    expect(onUpdate.mock.lastCall![0].pose.geographicState).toBe("OFF_ROUTE");
+    session.stop();
+  });
+
+  it("does not show a directional cue from an expired compass reading", async () => {
+    const fake = createAdapters();
+    const onUpdate = vi.fn();
+    const lock = calibration();
+    lock.geographicYawValidated = true;
+    lock.absoluteHeading = { headingRad: 0, accuracyDeg: 5, source: "webkit-compass",
+      usable: true, reason: "validated", timestampMs: 1000 };
+    const session = new NavigationSession({
+      route: routePlan(), localRoute: localRoute(), groundRoute: groundRoute(),
+      calibration: lock, clock: fake.clock, adapters: fake.adapters,
+      onUpdate, onUnavailable: vi.fn(), onArrived: vi.fn()
+    });
+    await session.start();
+    fake.emitLocation(fix(22.57, 1000));
+    expect(onUpdate.mock.lastCall![0].geographic.direction).toBe("ahead");
+    fake.emitLocation(fix(22.57, 4000));
+    expect(onUpdate.mock.lastCall![0].geographic.direction).toBeNull();
+    session.stop();
+  });
+  it("preserves actual lateral GPS position while progress remains route matched", async () => {
+    const fake=createAdapters(); const onUpdate=vi.fn();
+    const epoch=Date.UTC(2026,8,29); const route=routePlan(); route.origin={lat:0,lng:0};
+    const local=localRoute(); const ground=groundRoute(); const lock=calibration();
+    const session=new NavigationSession({route, localRoute:local, groundRoute:ground, calibration:lock,
+      routeFrame:{origin:{eastMeters:0,northMeters:0,upMeters:0},tangentBearingRad:0},
+      clock:{epochNow:()=>epoch,monotonicNow:()=>1000},
+      adapters:fake.adapters,onUpdate,onUnavailable:vi.fn(),onArrived:vi.fn()});
+    await session.start();
+    fake.emitLocation({point:{lat:0,lng:10/6378137*180/Math.PI},accuracyMeters:5,timestampMs:epoch});
+    expect(onUpdate.mock.lastCall![0].pose.cameraPositionGroundMeters[0]).toBeCloseTo(10);
+    expect(onUpdate.mock.lastCall![0].pose.routeProgressMeters).toBe(0);
+    session.stop();
+  });
+
+  it("preserves fresh visual correction through epoch GPS updates and rejects poor relocation", async () => {
+    const fake=createAdapters(); const onUpdate=vi.fn(); const onArrived=vi.fn();
+    let now=1000; const epoch=Date.UTC(2026,8,29);
+    const session=new NavigationSession({route:routePlan(),localRoute:localRoute(),groundRoute:groundRoute(),calibration:calibration(),
+      clock:{epochNow:()=>epoch+now,monotonicNow:()=>now},adapters:fake.adapters,onUpdate,onUnavailable:vi.fn(),onArrived});
+    await session.start(); fake.emitTracker(tracked(1000,[1,0,0,0,1,0,25,0,1]));
+    now=1100; fake.emitLocation(fix(22.5701,epoch+now));
+    expect(onUpdate.mock.lastCall![0].pose.visualCorrection.imageHomography[6]).toBe(25);
+    const before=onUpdate.mock.lastCall![0].pose;
+    now=1200; fake.emitLocation({...fix(22.571,epoch+now),accuracyMeters:100});
+    expect(onUpdate.mock.lastCall![0].pose.cameraPositionGroundMeters).toEqual(before.cameraPositionGroundMeters);
+    expect(onUpdate.mock.lastCall![0].pose.routeProgressMeters).toBe(before.routeProgressMeters);
+    expect(onUpdate.mock.lastCall![0].pose.geographicState).toBe("LOCATION_UNCERTAIN");
+    expect(onArrived).not.toHaveBeenCalled(); session.stop();
+  });
+
+  it("expires geographic guidance without fresh accepted GPS", async () => {
+    vi.useFakeTimers(); const fake=createAdapters(); const onUpdate=vi.fn();
+    let now=1000; const epoch=Date.UTC(2026,8,29);
+    const session=new NavigationSession({route:routePlan(),localRoute:localRoute(),groundRoute:groundRoute(),calibration:calibration(),
+      clock:{epochNow:()=>epoch+now,monotonicNow:()=>now},adapters:fake.adapters,onUpdate,onUnavailable:vi.fn(),onArrived:vi.fn()});
+    await session.start(); fake.emitLocation(fix(22.5701,epoch+now));
+    now=7000; vi.advanceTimersByTime(6000);
+    expect(onUpdate.mock.lastCall![0].pose.geographicState).toBe("LOCATION_UNCERTAIN");
+    session.stop(); vi.useRealTimers();
+  });
   it("updates the provisional sensor pose while OpenCV is still starting", async () => {
     const fake = createAdapters();
     let ready!: () => void;
     fake.adapters.tracker.start = () => new Promise<void>((resolve) => { ready = resolve; });
     const onUpdate = vi.fn();
-    const session = new NavigationSession({route:routePlan(), localRoute:localRoute(), groundRoute:groundRoute(),
+    const session = new NavigationSession({route:routePlan(), localRoute:localRoute(), groundRoute:groundRoute(), clock:fake.clock,
       calibration:calibration(), adapters:fake.adapters, onUpdate, onUnavailable:vi.fn(), onArrived:vi.fn()});
     const starting = session.start();
     fake.emitSensor({timestampMs:900,cameraFromGround:IDENTITY_MAT4,orientationQuaternion:[0,0,0,1]});
@@ -50,7 +189,7 @@ describe("NavigationSession", () => {
       localRoute: localRoute(),
       groundRoute: groundRoute(),
       calibration: calibration(),
-      adapters: fake.adapters,
+      adapters: fake.adapters, clock: fake.clock,
       onUpdate,
       onUnavailable: vi.fn(),
       onArrived: vi.fn()
@@ -76,14 +215,13 @@ describe("NavigationSession", () => {
       localRoute: localRoute(),
       groundRoute: groundRoute(),
       calibration: calibration(),
-      adapters: fake.adapters,
+      adapters: fake.adapters, clock: fake.clock,
       onUpdate,
       onUnavailable: vi.fn(),
       onArrived
     });
     await session.start();
-    fake.emitLocation(fix(22.5701, 1000));
-    fake.emitLocation(fix(22.57096, 2000));
+    for(let index=0;index<=54;index++) fake.emitLocation(fix(22.57+index*0.000018,index*1000+1000));
 
     expect(onArrived).toHaveBeenCalledOnce();
     expect(fake.disposers.every((dispose) => dispose.mock.calls.length === 1)).toBe(true);
@@ -102,7 +240,7 @@ describe("NavigationSession", () => {
       localRoute: localRoute(),
       groundRoute: groundRoute(),
       calibration: calibration(),
-      adapters: fake.adapters,
+      adapters: fake.adapters, clock: fake.clock,
       onUpdate: vi.fn(),
       onUnavailable,
       onArrived: vi.fn()
@@ -143,7 +281,7 @@ describe("NavigationSession", () => {
       localRoute: local,
       groundRoute: ground,
       calibration: lock,
-      adapters: fake.adapters,
+      adapters: fake.adapters, clock: fake.clock,
       onUpdate,
       onUnavailable: vi.fn(),
       onArrived: vi.fn()
@@ -153,12 +291,12 @@ describe("NavigationSession", () => {
     fake.emitLocation({
       point: { lat: 0.0004491576, lng: 0 },
       accuracyMeters: 5,
-      timestampMs: 1000
+      timestampMs: TEST_EPOCH+1000
     });
 
     expect(onUpdate.mock.lastCall?.[0].pose.routeProgressMeters).toBeCloseTo(50, 1);
     expect(onUpdate.mock.lastCall?.[0].pose.cameraPositionGroundMeters).toEqual([
-      expect.closeTo(0),
+      expect.closeTo(2),
       1.4,
       expect.closeTo(0, 1)
     ]);
@@ -167,12 +305,13 @@ describe("NavigationSession", () => {
   it("reports the latest accepted fix and snapped progress for re-alignment", async () => {
     const fake = createAdapters();
     const onLocationAccepted = vi.fn();
+    const initial=calibration(); initial.calibrationRouteDistanceMeters=55.65;
     const session = new NavigationSession({
       route: routePlan(),
       localRoute: localRoute(),
       groundRoute: groundRoute(),
-      calibration: calibration(),
-      adapters: fake.adapters,
+      calibration: initial,
+      adapters: fake.adapters, clock: fake.clock,
       onUpdate: vi.fn(),
       onLocationAccepted,
       onUnavailable: vi.fn(),
@@ -193,12 +332,13 @@ describe("NavigationSession", () => {
     const fake = createAdapters();
     const onUpdate = vi.fn();
     const onLocationAccepted = vi.fn();
+    const initial=calibration(); initial.calibrationRouteDistanceMeters=22.26;
     const session = new NavigationSession({
       route: routePlan(),
       localRoute: localRoute(),
       groundRoute: groundRoute(),
-      calibration: calibration(),
-      adapters: fake.adapters,
+      calibration: initial,
+      adapters: fake.adapters, clock: fake.clock,
       onUpdate,
       onLocationAccepted,
       onUnavailable: vi.fn(),
@@ -216,7 +356,7 @@ describe("NavigationSession", () => {
       accepted,
       expect.closeTo(22.26, 0)
     );
-    expect(onUpdate).toHaveBeenCalledOnce();
+    expect(onUpdate.mock.calls.every(([snapshot]) => snapshot.pose.routeProgressMeters === onUpdate.mock.calls[0]![0].pose.routeProgressMeters)).toBe(true);
   });
 
   it("feeds lost tracker quality into the rendered pose immediately", async () => {
@@ -227,7 +367,7 @@ describe("NavigationSession", () => {
       localRoute: localRoute(),
       groundRoute: groundRoute(),
       calibration: calibration(),
-      adapters: fake.adapters,
+      adapters: fake.adapters, clock: fake.clock,
       onUpdate,
       onUnavailable: vi.fn(),
       onArrived: vi.fn()
@@ -254,6 +394,7 @@ describe("NavigationSession", () => {
 });
 
 function createAdapters() {
+  let monotonicMs=1000;
   let locationListener: ((fix: LocationFix) => void) | undefined;
   let sensorListener: ((update: SensorPoseUpdate) => void) | undefined;
   let frameListener: ((sample: FrameSample) => void) | undefined;
@@ -290,10 +431,11 @@ function createAdapters() {
     }
   };
   return {
+    clock:{epochNow:()=>TEST_EPOCH+monotonicMs,monotonicNow:()=>monotonicMs},
     adapters,
     disposers,
     trackerDispose,
-    emitLocation: (fix: LocationFix) => locationListener?.(fix),
+    emitLocation: (fix: LocationFix) => { monotonicMs=Math.max(monotonicMs,fix.timestampMs-TEST_EPOCH); locationListener?.(fix); },
     emitSensor: (update: SensorPoseUpdate) => sensorListener?.(update),
     emitFrame: (sample: FrameSample) => frameListener?.(sample),
     emitTracker: (result: TrackerResult) => trackerListener?.(result),
@@ -321,9 +463,11 @@ function fix(lat: number, timestampMs: number): LocationFix {
   return {
     point: { lat, lng: 88.36 },
     accuracyMeters: 5,
-    timestampMs
+    timestampMs: TEST_EPOCH+timestampMs
   };
 }
+
+const TEST_EPOCH=Date.UTC(2026,8,29);
 
 function routePlan(): RoutePlan {
   return {

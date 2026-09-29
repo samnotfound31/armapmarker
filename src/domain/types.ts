@@ -47,6 +47,22 @@ export type RouteStep = {
   maneuver: string;
   distanceMeters: number;
   polyline: string;
+  /** Start of this instruction on the decoded route geometry, in metres. */
+  routeProgressMeters?: number;
+};
+
+export type NavigationGeographicState =
+  | "VALID" | "LOCATION_UNCERTAIN" | "HEADING_UNCERTAIN"
+  | "ROUTE_MATCH_UNCERTAIN" | "WRONG_WAY" | "OFF_ROUTE" | "DEVIATED";
+
+export type AbsoluteHeading = {
+  /** Rear-camera azimuth clockwise from geographic north, in radians. */
+  headingRad: number | null;
+  accuracyDeg?: number;
+  source: string;
+  usable: boolean;
+  reason: string;
+  timestampMs: number;
 };
 
 export type RoutePlan = {
@@ -103,6 +119,8 @@ export type GroundCalibration = {
   earthFromGroundAtLock?: Mat3;
   calibrationRouteDistanceMeters: number;
   lockedAtMs?: number;
+  geographicYawValidated?: boolean;
+  absoluteHeading?: AbsoluteHeading;
 };
 
 export type TrackingState = "locked" | "weak" | "realign";
@@ -141,6 +159,7 @@ export type PoseEstimate = {
   routeProgressMeters: number;
   quality: TrackingQuality;
   timestampMs: number;
+  geographicState?: NavigationGeographicState;
 };
 
 export type NavigationStage =

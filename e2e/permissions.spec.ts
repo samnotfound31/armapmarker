@@ -15,7 +15,7 @@ test("recovers from a denied camera gesture", async ({ page }) => {
   await expect(page.getByRole("alert")).toContainText(/allow camera access/i);
   await page.getByRole("button", { name: /try permissions again/i }).click();
   await expect(
-    page.getByRole("heading", { name: /align route to the road/i })
+    page.getByRole("heading", { name: /check the road view/i })
   ).toBeVisible();
 });
 

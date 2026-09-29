@@ -24,6 +24,7 @@ import type {
   RoutePlan,
   TrackingQuality
 } from "../domain/types";
+import { AcceptedLocationFilter } from "../device/AcceptedLocationFilter";
 import { stopMediaStream } from "../device/camera";
 import { requestCurrentLocation, type LocationFix } from "../device/location";
 import { requestArAccess, type ArAccessGrant } from "../device/permissions";
@@ -60,6 +61,7 @@ export type AppNavigationSessionInput = Omit<
   "adapters"
 > & {
   grant: ArAccessGrant;
+  readAcceptedLocation?: () => LocationFix | undefined;
 };
 
 type AppProps = {
@@ -106,8 +108,8 @@ export function App({
   requestLocation = requestCurrentLocation,
   requestRoute = requestWalkingRoute,
   requestAccess = requestArAccess,
-  createCalibrationRuntime: calibrationFactory = ({ stream }, deliveredDimensions) =>
-    createBrowserCalibrationRuntime(stream, deliveredDimensions),
+  createCalibrationRuntime: calibrationFactory = ({ stream, location }, deliveredDimensions) =>
+    createBrowserCalibrationRuntime(stream, deliveredDimensions, location),
   createSession: sessionFactory = createDefaultSession,
   backendFactory,
   sessionStore: providedSessionStore
@@ -283,6 +285,7 @@ export function App({
       activeCalibrationRuntime.current = runtime;
       setGrant(nextGrant);
       setPreparedRoute(nextPreparedRoute);
+      setRoute(nextPreparedRoute.normalizedRoute);
       setCalibrationRuntime(runtime);
       setStage("calibration");
       store.saveSession({
@@ -315,6 +318,10 @@ export function App({
       enuOrigin: preparedRoute.enuOrigin,
       localRoute: preparedRoute.localRoute,
       groundRoute: preparedRoute.groundRoute,
+      routeFrame: preparedRoute.routeFrame,
+      initialLocation: latestAcceptedFix.current,
+      initialMatchUncertain: preparedRoute.initialMatchUncertain,
+      readAcceptedLocation: () => latestAcceptedFix.current,
       calibration: lockedCalibration,
       grant,
       onUpdate: (snapshot) => {
@@ -361,11 +368,13 @@ export function App({
     try {
       const nextPreparedRoute = prepareRoute(
         route,
-        latestAcceptedFix.current ?? grant.location
+        latestAcceptedFix.current ?? grant.location,
+        latestAcceptedProgressMeters.current
       );
-      const runtime = calibrationFactory(grant, calibrationDimensions.current);
+      const runtime = calibrationFactory({...grant,location:latestAcceptedFix.current ?? grant.location}, calibrationDimensions.current);
       activeCalibrationRuntime.current = runtime;
       setPreparedRoute(nextPreparedRoute);
+      setRoute(nextPreparedRoute.normalizedRoute);
       setCalibrationRuntime(runtime);
       setStage("calibration");
       store.saveSession({
@@ -413,6 +422,14 @@ export function App({
     activeRouteRequest.current = controller;
     void requestLocation(controller.signal)
       .then(async (fix) => {
+        const decision = new AcceptedLocationFilter().accept(
+          fix,
+          Date.now(),
+          performance.now()
+        );
+        if (!decision.accepted) {
+          throw new Error("Wait for an accurate, fresh location before recalculating.");
+        }
         const nextRoute = await requestRoute(
           { origin: fix.point, destination },
           controller.signal
@@ -481,16 +498,19 @@ export function App({
       if (!currentGrant || !currentRoute) return;
       try {
         setMediaStreamEnabled(currentGrant.stream, true);
+        const latestLocation = latestAcceptedFix.current ?? currentGrant.location;
         const nextPreparedRoute = prepareRoute(
           currentRoute,
-          latestAcceptedFix.current ?? currentGrant.location
+          latestLocation,
+          latestAcceptedProgressMeters.current
         );
         const runtime = calibrationFactory(
-          currentGrant,
+          { ...currentGrant, location: latestLocation },
           calibrationDimensions.current
         );
         activeCalibrationRuntime.current = runtime;
         setPreparedRoute(nextPreparedRoute);
+        setRoute(nextPreparedRoute.normalizedRoute);
         setCalibrationRuntime(runtime);
         setCalibrationGeneration((generation) => generation + 1);
         stageRef.current = "calibration";
@@ -569,11 +589,14 @@ export function App({
           route={preparedRoute.groundRoute}
           calibration={calibration}
           pose={runtimeSnapshot.pose}
+          navigation={runtimeSnapshot.navigation}
+          geographic={runtimeSnapshot.geographic}
           onFailure={handleViewportFailure}
           {...(backendFactory ? { backendFactory } : {})}
         />
         <NavigationHud
           navigation={hudNavigation}
+          direction={runtimeSnapshot.geographic?.direction}
           onExit={endWalk}
           onRealign={realign}
           onKeepRoute={() => setDismissedOffRoute(true)}
@@ -614,6 +637,8 @@ export function App({
           screenPointToGround={calibrationRuntime.screenPointToGround}
           groundRoute={preparedRoute.groundRoute}
           calibrationProgressMeters={preparedRoute.calibrationProgressMeters}
+          routeBearingRad={preparedRoute.routeBearingRad}
+          actualRoutePosition={preparedRoute.initialActualPositionRoute}
           intrinsics={calibrationRuntime.intrinsics}
           imageToScreen={calibrationRuntime.imageToScreen}
           onLock={startNavigation}
@@ -685,10 +710,10 @@ function setMediaStreamEnabled(stream: MediaStream, enabled: boolean): void {
 function createDefaultSession(
   input: AppNavigationSessionInput
 ): NavigationSessionLike {
-  const { grant, ...options } = input;
+  const { grant, readAcceptedLocation, ...options } = input;
   return new NavigationSession({
     ...options,
-    adapters: createBrowserNavigationAdapters(grant.stream, input.calibration)
+    adapters: createBrowserNavigationAdapters(grant.stream, input.calibration, readAcceptedLocation)
   });
 }
 
@@ -697,9 +722,12 @@ function createInitialSnapshot(
   calibration: GroundCalibration
 ): NavigationRuntimeSnapshot {
   const progress = calibration.calibrationRouteDistanceMeters;
-  const timestampMs = calibration.lockedAtMs ?? Date.now();
+  const timestampMs = calibration.lockedAtMs ?? performance.now();
   return {
-    pose: new PoseFusion(calibration).snapshot(timestampMs),
+    pose: {
+      ...new PoseFusion(calibration).snapshot(timestampMs),
+      geographicState: "LOCATION_UNCERTAIN"
+    },
     navigation: {
       routeProgressMeters: progress,
       acceptedGpsProgressMeters: progress,
@@ -709,7 +737,17 @@ function createInitialSnapshot(
       trackingQuality: INITIAL_QUALITY,
       arrived: false,
       realignRequired: false,
-      timestampMs
+      timestampMs,
+      geographicState: "LOCATION_UNCERTAIN"
+    },
+    geographic: {
+      locationStatus: "REJECTED",
+      locationReason: "awaiting-location",
+      locationAccuracyMeters: null,
+      locationAgeMs: null,
+      heading: calibration.absoluteHeading ?? null,
+      headingAgeMs: null,
+      direction: null
     }
   };
 }

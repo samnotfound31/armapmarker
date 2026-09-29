@@ -122,7 +122,7 @@ describe("App integrated AR walk", () => {
     fireEvent.click(await screen.findByRole("button", { name: /start ar walk/i }));
     fireEvent.click(screen.getByRole("button", { name: /enable camera and sensors/i }));
 
-    expect(await screen.findByRole("heading", { name: /align route to the road/i })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: /check the road view/i })).toBeVisible();
     await completeCalibration();
 
     expect(createSession).toHaveBeenCalledOnce();
@@ -225,7 +225,7 @@ describe("App integrated AR walk", () => {
     expect(recovery.sessionStops[0]).toHaveBeenCalledOnce();
     expect(recovery.track.stop).not.toHaveBeenCalled();
     expect(
-      await screen.findByRole("heading", { name: /align route to the road/i })
+      await screen.findByRole("heading", { name: /check the road view/i })
     ).toBeVisible();
     expect(recovery.createCalibrationRuntime).toHaveBeenCalledTimes(2);
     expect(recovery.createCalibrationRuntime.mock.calls[1]?.[1]).toEqual({
@@ -247,7 +247,8 @@ describe("App integrated AR walk", () => {
     const navigation = navigationAdapterHarness();
     const recovery = await setupRecoveryApp({
       sessionStore: createSessionStore(persisted.storage),
-      navigationAdapters: navigation.adapters
+      navigationAdapters: navigation.adapters,
+      navigationClock: navigation.clock
     });
     await waitFor(() => expect(navigation.hasSubscribers()).toBe(true));
 
@@ -272,7 +273,19 @@ describe("App integrated AR walk", () => {
     });
     expect(persisted.writes).toEqual([]);
 
-    act(() => navigation.emitLocation(recovery.freshFix));
+    // Move at a pedestrian pace so the continuity matcher can accept each fix.
+    act(() => {
+      for (let index = 1; index < 10; index += 1) {
+        navigation.emitLocation({
+          point: { lat: 22.57 + index * 0.000045, lng: 88.36 },
+          accuracyMeters: 5,
+          timestampMs: 2000 + index * 2000
+        });
+      }
+    });
+    persisted.writes.length = 0;
+    const walkedFix = { ...recovery.freshFix, timestampMs: 22_000 };
+    act(() => navigation.emitLocation(walkedFix));
     expect(persisted.writes).toHaveLength(1);
     expect(persisted.writes[0]?.key).toBe("ar-walking-navigation:progress");
     expect(persisted.writes[0]?.value).not.toMatch(/encoded|route|museum/i);
@@ -281,7 +294,7 @@ describe("App integrated AR walk", () => {
       navigation.emitLocation({
         point: { lat: 22.57085, lng: 88.36 },
         accuracyMeters: 5,
-        timestampMs: recovery.freshFix.timestampMs
+        timestampMs: walkedFix.timestampMs
       });
       navigation.emitLocation({
         point: { lat: 22.5708, lng: 88.36 },
@@ -341,6 +354,19 @@ describe("App integrated AR walk", () => {
     expect(await screen.findByRole("heading", { name: "City Museum" })).toBeVisible();
   });
 
+  it("does not recalculate from a location too imprecise for active navigation", async () => {
+    const recovery = await setupRecoveryApp({ recalculationAccuracyMeters: 20 });
+    const offRoute = runtimeSnapshot(35, 65, false);
+    offRoute.navigation.offRoute = true;
+    recovery.sessionInputs[0]?.onUpdate(offRoute);
+
+    fireEvent.click(await screen.findByRole("button", { name: /^recalculate$/i }));
+
+    await waitFor(() => expect(recovery.requestLocation).toHaveBeenCalledTimes(2));
+    expect(recovery.requestRoute).toHaveBeenCalledTimes(1);
+    expect(await screen.findByRole("alert")).toHaveTextContent(/accurate, fresh location/i);
+  });
+
   it("keeps the existing route preview and explains recalculation failure", async () => {
     const recovery = await setupRecoveryApp({ failRecalculation: true });
     const offRoute = runtimeSnapshot(35, 65, false);
@@ -376,7 +402,7 @@ describe("App integrated AR walk", () => {
     fireEvent(document, new Event("visibilitychange"));
 
     expect(
-      await screen.findByRole("heading", { name: /align route to the road/i })
+      await screen.findByRole("heading", { name: /check the road view/i })
     ).toBeVisible();
   });
 
@@ -395,7 +421,7 @@ describe("App integrated AR walk", () => {
 
     expect(recovery.sessionStops[0]).toHaveBeenCalledOnce();
     expect(
-      await screen.findByRole("heading", { name: /align route to the road/i })
+      await screen.findByRole("heading", { name: /check the road view/i })
     ).toBeVisible();
   });
 
@@ -461,7 +487,7 @@ describe("App integrated AR walk", () => {
     expect(lifecycle.calibrationRuntimes[1]?.dispose).not.toHaveBeenCalled();
     expect(lifecycle.sessionInputs).toHaveLength(0);
     expect(lifecycle.track.enabled).toBe(true);
-    expect(await screen.findByRole("heading", { name: /align route to the road/i })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: /check the road view/i })).toBeVisible();
   });
 });
 
@@ -477,7 +503,7 @@ async function reachCalibration(): Promise<void> {
   fireEvent.click(await screen.findByRole("button", { name: /choose city museum/i }));
   fireEvent.click(await screen.findByRole("button", { name: /start ar walk/i }));
   fireEvent.click(screen.getByRole("button", { name: /enable camera and sensors/i }));
-  await screen.findByRole("heading", { name: /align route to the road/i });
+  await screen.findByRole("heading", { name: /check the road view/i });
 }
 
 async function completeCalibration(): Promise<void> {
@@ -496,7 +522,9 @@ async function setupRecoveryApp(
   options: {
     failRecalculation?: boolean;
     failRenderer?: boolean;
+    recalculationAccuracyMeters?: number;
     navigationAdapters?: NavigationSessionAdapters;
+    navigationClock?: { epochNow(): number; monotonicNow(): number };
     sessionStore?: SessionStore;
     startAt?: "calibration" | "navigating";
   } = {}
@@ -515,8 +543,8 @@ async function setupRecoveryApp(
   };
   const freshFix = {
     point: { lat: 22.57045, lng: 88.36 },
-    accuracyMeters: 5,
-    timestampMs: 5000
+    accuracyMeters: options.recalculationAccuracyMeters ?? 5,
+    timestampMs: Date.now()
   };
   const requestLocation = vi
     .fn()
@@ -566,6 +594,7 @@ async function setupRecoveryApp(
             groundRoute: input.groundRoute,
             calibration: input.calibration,
             adapters: options.navigationAdapters,
+            ...(options.navigationClock ? { clock: options.navigationClock } : {}),
             onUpdate: input.onUpdate,
             ...(input.onLocationAccepted
               ? { onLocationAccepted: input.onLocationAccepted }
@@ -600,6 +629,7 @@ async function setupRecoveryApp(
 }
 
 function navigationAdapterHarness() {
+  let nowMs = 1000;
   let locationListener: ((fix: LocationFix) => void) | undefined;
   let sensorListener: ((update: SensorPoseUpdate) => void) | undefined;
   let trackerListener: ((result: TrackerResult) => void) | undefined;
@@ -637,8 +667,12 @@ function navigationAdapterHarness() {
   };
   return {
     adapters,
+    clock: { epochNow: () => nowMs, monotonicNow: () => nowMs },
     hasSubscribers: () => Boolean(locationListener && sensorListener && trackerListener),
-    emitLocation: (fix: LocationFix) => locationListener?.(fix),
+    emitLocation: (fix: LocationFix) => {
+      nowMs = Math.max(nowMs, fix.timestampMs);
+      locationListener?.(fix);
+    },
     emitSensor: (update: SensorPoseUpdate) => sensorListener?.(update),
     emitTracker: (result: TrackerResult) => trackerListener?.(result)
   };
@@ -805,5 +839,7 @@ function runtimeSnapshot(
     quality: navigation.trackingQuality,
     timestampMs: navigation.timestampMs
   };
-  return { pose, navigation };
+  pose.geographicState="VALID";
+  return { pose, navigation, geographic:{locationStatus:"GOOD",locationReason:"accepted",locationAccuracyMeters:5,
+    locationAgeMs:0,heading:null,headingAgeMs:null,direction:null} };
 }

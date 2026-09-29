@@ -45,6 +45,9 @@ export const routeApiResponseSchema = z
   .strict();
 
 export const routePlanSchema = routeApiResponseSchema.extend({
+  steps: z.array(routeStepSchema.extend({
+    routeProgressMeters: z.number().finite().nonnegative().optional()
+  })),
   destination: geoPointSchema.extend({
     name: z.string().trim().min(1),
     placeId: z.string().trim().min(1).max(512).optional()

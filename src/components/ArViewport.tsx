@@ -14,6 +14,8 @@ import {
   readScreenOrientationAngle,
   resolveDisplayRotation
 } from "../geometry/displayTransform";
+import type { NavigationSnapshot } from "../navigation/navigationEngine";
+import type { NavigationRuntimeSnapshot } from "../session/NavigationSession";
 
 export type ArViewportProps = {
   stream: MediaStream;
@@ -22,6 +24,8 @@ export type ArViewportProps = {
   pose: PoseEstimate;
   backendFactory?: RouteRenderBackendFactory;
   onFailure?: (failure: ArViewportFailure) => void;
+  navigation?: NavigationSnapshot;
+  geographic?: NavigationRuntimeSnapshot["geographic"];
 };
 
 export type ArViewportFailure =
@@ -40,7 +44,9 @@ export function ArViewport({
   calibration,
   pose,
   backendFactory,
-  onFailure
+  onFailure,
+  navigation,
+  geographic
 }: ArViewportProps) {
   const hostRef = useRef<HTMLElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -210,6 +216,13 @@ export function ArViewport({
       />
       <canvas ref={canvasRef} className="ar-overlay" aria-hidden="true" />
       {debugEnabled && diagnostics && <output className="ar-debug" aria-label="AR diagnostics">
+        <div>Geographic state: {pose.geographicState ?? "HEADING_UNCERTAIN"}</div>
+        <div>GPS: {geographic?.locationStatus ?? "REJECTED"} · Accuracy: {geographic?.locationAccuracyMeters?.toFixed(1) ?? "—"} m · Age: {geographic?.locationAgeMs !== null && geographic?.locationAgeMs !== undefined ? (geographic.locationAgeMs/1000).toFixed(1) : "—"} s</div>
+        <div>Location: {geographic?.locationReason ?? "awaiting-location"}</div>
+        <div>Heading: {geographic?.heading?.usable ? "available" : "uncertain"} · {geographic?.heading?.headingRad !== null && geographic?.heading?.headingRad !== undefined ? (geographic.heading.headingRad*180/Math.PI).toFixed(0) : "—"}° · Accuracy: {geographic?.heading?.accuracyDeg?.toFixed(0) ?? "—"}°</div>
+        <div>Route segment: {navigation?.matchedSegmentIndex ?? "—"} · Progress: {pose.routeProgressMeters.toFixed(1)} m</div>
+        <div>Cross-track: {navigation?.crossTrackDistanceMeters?.toFixed(1) ?? "—"} m · Bearing: {navigation?.routeBearingRad !== undefined ? ((navigation.routeBearingRad*180/Math.PI+360)%360).toFixed(0) : "—"}°</div>
+        <div>Movement agreement: {navigation?.movementAgreement?.toFixed(2) ?? "—"}</div>
         <div>State: {pose.quality.state === "weak" ?
           pose.quality.visualUpdate === "valid" ? "RECOVERING" : pose.quality.visualUpdate === "rejected" ? "WEAK" : "APPROXIMATE" : pose.quality.state.toUpperCase()}</div>
         <div>Visual features: {pose.quality.featureCount} · Inliers: {pose.quality.inlierCount}</div>
@@ -220,7 +233,7 @@ export function ArViewport({
         <div>Confidence: {(pose.quality.confidence ?? 0.3).toFixed(2)}</div>
         <div>Reason: {pose.quality.rejectionReason ?? diagnostics.reason}</div>
       </output>}
-      {diagnostics?.renderedMarkers === 0 && pose.quality.state !== "realign" &&
+      {diagnostics?.renderedMarkers === 0 && pose.quality.state !== "realign" && pose.geographicState === "VALID" &&
         <p className="projection-hint">{diagnostics.reason === "no-route-ahead" ? "End of route ahead" : "Point toward the path with ground in view"}</p>}
       {compatibilityError ? (
         <div className="ar-compatibility" role="alert">

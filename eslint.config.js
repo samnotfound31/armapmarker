@@ -2,7 +2,7 @@ import tseslint from "typescript-eslint";
 
 export default tseslint.config(
   {
-    ignores: ["dist", "coverage", "node_modules", ".worktrees"]
+    ignores: ["dist", "coverage", "node_modules", ".worktrees", "test-results", "playwright-report"]
   },
   ...tseslint.configs.recommended,
   {

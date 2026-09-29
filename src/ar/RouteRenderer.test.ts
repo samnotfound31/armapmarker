@@ -6,6 +6,17 @@ import { IDENTITY_MAT3, IDENTITY_MAT4 } from "../test/geometryFixtures";
 import { RouteRenderer } from "./RouteRenderer";
 
 describe("RouteRenderer", () => {
+  it.each(["OFF_ROUTE", "WRONG_WAY", "HEADING_UNCERTAIN", "LOCATION_UNCERTAIN", "ROUTE_MATCH_UNCERTAIN", "DEVIATED"] as const)(
+    "suppresses visually locked markers when geographic state is %s", (geographicState) => {
+      const backend = new FakeRenderer();
+      const renderer = createRenderer(backend);
+      const wrong = { ...pose(0), geographicState };
+      renderer.render(wrong);
+      expect(backend.viewCalls.at(-1)!.overlayOpacity).toBe(0);
+      renderer.render({ ...wrong, geographicState: "VALID" });
+      expect(backend.viewCalls.at(-1)!.overlayOpacity).toBe(1);
+    }
+  );
   it("reports why a valid HUD route has no projected markers", () => {
     const backend = new FakeRenderer();
     const renderer = createRenderer(backend);
@@ -121,5 +132,6 @@ function pose(
       medianReprojectionErrorPx: 1
     },
     timestampMs: 1
+    , geographicState: "VALID"
   };
 }

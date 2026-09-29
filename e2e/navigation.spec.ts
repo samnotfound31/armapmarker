@@ -54,7 +54,7 @@ test("survives rotation, backgrounding, and explicit re-alignment", async ({
   await completeCalibration(page);
   await page.setViewportSize({ width: 844, height: 390 });
   await expect(
-    page.getByRole("heading", { name: /align route to the road/i })
+    page.getByRole("heading", { name: /check the road view/i })
   ).toBeVisible();
   await expect(
     page.getByLabel(/augmented reality navigation view/i)
@@ -78,13 +78,13 @@ test("survives rotation, backgrounding, and explicit re-alignment", async ({
     document.dispatchEvent(new Event("visibilitychange"));
   });
   await expect(
-    page.getByRole("heading", { name: /align route to the road/i })
+    page.getByRole("heading", { name: /check the road view/i })
   ).toBeVisible();
   await completeRoadAlignment(page);
 
   await invokeHarness(page, "realign");
   await page.getByRole("button", { name: /re-align/i }).click();
   await expect(
-    page.getByRole("heading", { name: /align route to the road/i })
+    page.getByRole("heading", { name: /check the road view/i })
   ).toBeVisible();
 });
