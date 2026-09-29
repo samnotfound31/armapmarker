@@ -18,6 +18,30 @@ import {
 } from "./NavigationSession";
 
 describe("NavigationSession", () => {
+  it("updates the provisional sensor pose while OpenCV is still starting", async () => {
+    const fake = createAdapters();
+    let ready!: () => void;
+    fake.adapters.tracker.start = () => new Promise<void>((resolve) => { ready = resolve; });
+    const onUpdate = vi.fn();
+    const session = new NavigationSession({route:routePlan(), localRoute:localRoute(), groundRoute:groundRoute(),
+      calibration:calibration(), adapters:fake.adapters, onUpdate, onUnavailable:vi.fn(), onArrived:vi.fn()});
+    const starting = session.start();
+    fake.emitSensor({timestampMs:900,cameraFromGround:IDENTITY_MAT4,orientationQuaternion:[0,0,0,1]});
+    expect(onUpdate).toHaveBeenCalledOnce();
+    fake.emitLocation(fix(22.5701,1000));
+    fake.emitSensor({timestampMs:1010,cameraFromGround:IDENTITY_MAT4,orientationQuaternion:[0,0,0.1,0.995]});
+    expect(onUpdate).toHaveBeenCalledTimes(3);
+    expect(onUpdate.mock.lastCall![0].pose.orientationQuaternion[2]).toBeGreaterThan(0.09);
+    session.stop();
+    expect(fake.disposers[0]).toHaveBeenCalledOnce();
+    expect(fake.disposers[1]).toHaveBeenCalledOnce();
+    ready();
+    await starting;
+    const frame = {close:vi.fn()} as unknown as ImageBitmap;
+    fake.emitFrame({frame,timestampMs:1100,sensorHomography:IDENTITY_MAT3});
+    expect(fake.adapters.tracker.submitFrame).not.toHaveBeenCalled();
+  });
+
   it("feeds sensors, visual tracking, and GPS while keeping progress GPS-owned", async () => {
     const fake = createAdapters();
     const onUpdate = vi.fn();

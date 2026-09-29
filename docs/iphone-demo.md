@@ -20,6 +20,7 @@ This remains a browser demo on approximately flat ground. Camera height uses a 1
 
 ## Recovery policy
 
+- Sensor orientation and GPS updates start immediately, including while OpenCV is still loading. Camera frame processing waits for the tracker to be ready.
 - Invalid geometry or insufficient evidence rejects that visual measurement. It does not stop the tracker or replace the last accepted correction.
 - The first poor frame marks tracking weak. Geometry remains present at reduced opacity while the existing visual correction ages out smoothly and sensor orientation continues.
 - Three stable updates recover a previously locked estimate.

@@ -12,6 +12,7 @@ import type { LocationFix } from "../device/location";
 import { applyMat4ToPoint } from "../geometry/groundCalibration";
 import {
   NavigationEngine,
+  selectNextManeuver,
   type NavigationSnapshot
 } from "../navigation/navigationEngine";
 import {
@@ -89,6 +90,14 @@ export class NavigationSession {
 
   constructor(private readonly options: NavigationSessionOptions) {
     this.fusion = new PoseFusion(options.calibration);
+    const progress = options.calibration.calibrationRouteDistanceMeters;
+    this.latestNavigation = {
+      routeProgressMeters: progress, acceptedGpsProgressMeters: progress,
+      remainingDistanceMeters: Math.max(0, options.route.distanceMeters - progress),
+      nextManeuver: selectNextManeuver(options.route.steps, progress),
+      offRoute: false, arrived: false, realignRequired: false,
+      trackingQuality: INITIAL_TRACKING_QUALITY, timestampMs: options.calibration.lockedAtMs ?? 0
+    };
     this.engine = new NavigationEngine(
       options.localRoute,
       options.route.steps,
@@ -101,25 +110,22 @@ export class NavigationSession {
     if (this.active) throw new Error("Navigation session is already running.");
     this.active = true;
     try {
+      // Keep the provisional ground pose responsive while OpenCV downloads or
+      // initializes. Frame processing starts only once the tracker is ready.
+      const subscribe = <T>(source: SessionSource<T>, listener: (value: T) => void) => {
+        if (!this.active) return;
+        const dispose = source.subscribe(listener, (message) => this.handleUnavailable(message));
+        if (this.active) this.disposers.push(dispose);
+        else dispose();
+      };
+      subscribe(this.options.adapters.location, (fix) => this.handleLocation(fix));
+      subscribe(this.options.adapters.sensor, (update) => this.handleSensor(update));
+      if (!this.active) return;
       await this.options.adapters.tracker.start({
         onResult: (result) => this.handleTrackerResult(result),
         onUnavailable: (message) => this.handleUnavailable(message)
       });
-      if (!this.active) return;
-      this.disposers.push(
-        this.options.adapters.location.subscribe(
-          (fix) => this.handleLocation(fix),
-          (message) => this.handleUnavailable(message)
-        ),
-        this.options.adapters.sensor.subscribe(
-          (update) => this.handleSensor(update),
-          (message) => this.handleUnavailable(message)
-        ),
-        this.options.adapters.frames.subscribe(
-          (sample) => this.handleFrame(sample),
-          (message) => this.handleUnavailable(message)
-        )
-      );
+      subscribe(this.options.adapters.frames, (sample) => this.handleFrame(sample));
     } catch (error) {
       const message = errorMessage(error, "Visual tracking could not start.");
       if (this.active) this.options.onUnavailable(message);
