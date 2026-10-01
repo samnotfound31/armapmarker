@@ -289,3 +289,10 @@ export function assertVisualContinuity(candidate: Mat3, previous: Mat3, width: n
     throw new RangeError("Visual motion is discontinuous.");
   }
 }
+
+/** Reject oversized candidates. No invalid observation is shrunk into trusted registration. */
+export function validateVisualResidual(matrix:Mat3,limits:Readonly<VisualResidualLimits>=DEFAULT_VISUAL_RESIDUAL_LIMITS):Mat3{
+ const normalized=normalizeHomography(matrix);assertVisualResidualLimits(limits);assertPlausibleProjectiveMatrix(normalized,limits);
+ if(maximumSampleDisplacement(normalized,limits)>limits.maxPointDisplacementPx)throw new RangeError("Visual registration exceeds its allowance.");
+ return normalized;
+}

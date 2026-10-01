@@ -52,6 +52,7 @@ describe("TrackerClient", () => {
     worker.emit({ type: "result", result: trackedResult(1000) });
 
     expect(onResult).not.toHaveBeenCalled();
+    expect(worker.posts.at(-1)?.message).toEqual({type:"commit",timestampMs:1000,accepted:false,promote:false});
     client.dispose();
   });
 
@@ -151,6 +152,26 @@ describe("TrackerClient", () => {
     expect(client.status).toBe("unavailable");
     expect(onUnavailable).toHaveBeenCalledWith("Main-thread OpenCV failed");
   });
+ it("never promotes a candidate rejected by the main estimator",async()=>{
+  const worker=new FakeWorker();const client=new TrackerClient({workerFactory:()=>worker,mainThreadFactory:vi.fn(),onResult:()=>false,now:()=>1100});
+  const start=client.start();worker.emit({type:"ready"});await start;
+  client.submitFrame(fakeBitmap().bitmap,1000,SENSOR_IDENTITY);worker.emit({type:"result",result:{...trackedResult(1000),promoteCandidate:true}});
+  expect(worker.posts.at(-1)?.message).toEqual({type:"commit",timestampMs:1000,accepted:false,promote:false});client.dispose();
+ });
+ it("watchdogs a silent worker and releases it for bounded reacquisition",async()=>{
+  vi.useFakeTimers();const worker=new FakeWorker(),onUnavailable=vi.fn();
+  const client=new TrackerClient({workerFactory:()=>worker,mainThreadFactory:vi.fn(),onResult:vi.fn(),onUnavailable,now:()=>1100});
+  const start=client.start();worker.emit({type:"ready"});await start;client.submitFrame(fakeBitmap().bitmap,1000,SENSOR_IDENTITY);
+  vi.advanceTimersByTime(1000);expect(client.status).toBe("unavailable");expect(worker.terminate).toHaveBeenCalledOnce();expect(onUnavailable).toHaveBeenCalledOnce();client.dispose();vi.useRealTimers();
+ });
+
+ it("disposes a main-thread tracker completing initialization after shutdown",async()=>{
+  let resolve!:(t:MainThreadTracker)=>void;const tracker={process:vi.fn(),dispose:vi.fn()};
+  const client=new TrackerClient({workerFactory:null,mainThreadFactory:()=>new Promise(r=>resolve=r),onResult:vi.fn()});
+  const start=client.start();client.dispose();resolve(tracker);await expect(start).rejects.toThrow(/disposed/);
+  expect(client.status).toBe("disposed");expect(tracker.dispose).toHaveBeenCalledOnce();
+ });
+
 });
 
 class FakeWorker implements TrackingWorkerLike {

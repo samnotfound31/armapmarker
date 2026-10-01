@@ -19,6 +19,7 @@ import {
 } from "../geometry/displayTransform";
 import { buildApproximateIntrinsics, type ImagePixel, type Vec3 } from "../geometry/intrinsics";
 import { loadOpenCvTracker, type OpenCvTracker } from "../tracking/OpenCvTracker";
+import { createBrowserPresentationAdapters } from "./browserAdapters";
 
 const IDENTITY_MAT3: Mat3 = [1, 0, 0, 0, 1, 0, 0, 0, 1];
 
@@ -93,6 +94,7 @@ export function createBrowserCalibrationRuntime(
   window.addEventListener("deviceorientationabsolute", onMotion, true);
 
   const feed: CalibrationFeed = {
+    createPresentationAdapters: calibration => createBrowserPresentationAdapters(calibration, () => location, false),
     async captureOrientation(selectedHeight = 1.4) {
       cameraHeightMeters = selectedHeight;
       const captured = await collectOrientationSamples(5, 4_000, cancelled.signal);

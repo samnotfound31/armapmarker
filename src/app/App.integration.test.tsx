@@ -306,13 +306,11 @@ describe("App integrated AR walk", () => {
     act(() => navigation.emitTracker(realignResult(5100)));
     expect(persisted.writes).toHaveLength(1);
 
-    fireEvent.click(await screen.findByRole("button", { name: /^re-align$/i }));
-    await completeCalibration();
-
-    expect(recovery.sessionInputs).toHaveLength(2);
-    expect(
-      recovery.sessionInputs[1]?.calibration.calibrationRouteDistanceMeters
-    ).toBeCloseTo(50, 0);
+    fireEvent.click(await screen.findByRole("button", { name: /^adjust alignment$/i }));
+    fireEvent.change(await screen.findByRole("slider",{name:"Lateral alignment"}),{target:{value:"0.5"}});
+    fireEvent.click(screen.getByRole("button",{name:"Lock alignment"}));
+    expect(recovery.sessionInputs).toHaveLength(1);
+    expect(persisted.writes).toHaveLength(1);
   });
 
   it("recomputes a nonzero calibration match from the latest accepted fix on re-alignment", async () => {
@@ -331,11 +329,8 @@ describe("App integrated AR walk", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: /^re-align$/i }));
     await completeCalibration();
-
     expect(recovery.sessionInputs).toHaveLength(2);
-    expect(
-      recovery.sessionInputs[1]?.calibration.calibrationRouteDistanceMeters
-    ).toBeCloseTo(50, 0);
+    expect(recovery.sessionInputs[1]?.calibration.calibrationRouteDistanceMeters).toBeCloseTo(50,0);
   });
 
   it("gets a fresh fix and replaces the route when recalculation succeeds", async () => {

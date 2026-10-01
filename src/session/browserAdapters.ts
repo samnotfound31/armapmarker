@@ -1,8 +1,10 @@
+import { CameraFrameTimeline } from "./CameraFrameTimeline";
+import { STABILIZATION_CONFIG } from "../pose/stabilizationConfig";
+import type {TrackingFrameContext} from "../tracking/types";
 import type {
   CameraIntrinsics,
   GroundCalibration,
-  Mat3,
-  Mat4
+  Mat3
 } from "../domain/types";
 import type { LocationFix } from "../device/location";
 import {
@@ -50,22 +52,29 @@ export class SensorFrameHomography {
 }
 
 export function createBrowserNavigationAdapters(
-  stream: MediaStream,
+  _stream: MediaStream,
   calibration: GroundCalibration,
   readLocation?: () => LocationFix | undefined
 ): NavigationSessionAdapters {
-  let latestCameraRotation: Mat3 | null = null;
   return {
+    ...createBrowserPresentationAdapters(calibration, readLocation),
     location: createBrowserLocationSource(),
-    sensor: createBrowserSensorSource(calibration, (rotation) => {
-      latestCameraRotation = rotation;
-    }, readLocation),
-    frames: createBrowserFrameSource(
-      stream,
-      calibration,
-      () => latestCameraRotation
-    ),
     tracker: new BrowserSessionTracker()
+  };
+}
+
+/** The calibration ghost and guidance share sensor axes and displayed-frame timing. */
+export function createBrowserPresentationAdapters(
+  calibration: GroundCalibration,
+  readLocation?: () => LocationFix | undefined,
+  captureBitmaps = true
+): Pick<NavigationSessionAdapters, "sensor" | "motion" | "bindVideo" | "frames"> {
+  let displayedVideo: HTMLVideoElement | null = null;
+  return {
+    sensor: createBrowserSensorSource(calibration, readLocation),
+    motion: createBrowserMotionSource(calibration),
+    bindVideo: (video) => { displayedVideo = video; },
+    frames: createBrowserFrameSource(() => displayedVideo, calibration, captureBitmaps)
   };
 }
 
@@ -108,7 +117,6 @@ function createBrowserLocationSource(): NavigationSessionAdapters["location"] {
 
 function createBrowserSensorSource(
   calibration: GroundCalibration,
-  onCameraRotation: (rotation: Mat3) => void,
   readLocation?: () => LocationFix | undefined
 ): NavigationSessionAdapters["sensor"] {
   return {
@@ -118,10 +126,11 @@ function createBrowserSensorSource(
         onError?.("A fixed orientation frame is unavailable. Re-align the route.");
         return () => undefined;
       }
+      let lastCameraPose = calibration.cameraFromGroundAtLock;
       let latestAbsoluteSampleMs = Number.NEGATIVE_INFINITY;
       const onOrientation = (event: DeviceOrientationEvent) => {
         try {
-          const now = performance.now();
+          const now = eventMonotonicTime(event.timeStamp, performance.now());
           const compass = (event as DeviceOrientationEvent & {
             webkitCompassHeading?: number;
           }).webkitCompassHeading;
@@ -135,8 +144,8 @@ function createBrowserSensorSource(
           const heading = readAbsoluteCameraHeading(event, now, declination);
           if (heading.usable) latestAbsoluteSampleMs = now;
           if (!heading.usable || !heading.orientation) {
-            listener({timestampMs:now,cameraFromGround:calibration.cameraFromGroundAtLock,
-              orientationQuaternion:quaternionFromCameraMatrix(calibration.cameraFromGroundAtLock),absoluteHeading:heading});
+            listener({timestampMs:now,cameraFromGround:lastCameraPose,
+              orientationQuaternion:quaternionFromCameraMatrix(lastCameraPose),absoluteHeading:heading});
             return;
           }
           const orientation: W3cDeviceOrientation = {
@@ -156,7 +165,7 @@ function createBrowserSensorSource(
               Math.max(1, window.innerHeight)
             )
           );
-          onCameraRotation(cameraRotation(cameraFromGround));
+          lastCameraPose = cameraFromGround;
           listener({
             timestampMs: now,
             cameraFromGround,
@@ -177,86 +186,57 @@ function createBrowserSensorSource(
   };
 }
 
-function createBrowserFrameSource(
-  stream: MediaStream,
-  calibration: GroundCalibration,
-  readCameraRotation: () => Mat3 | null
-): NavigationSessionAdapters["frames"] {
-  return {
-    subscribe(listener, onError) {
-      const video = document.createElement("video");
-      video.srcObject = stream;
-      video.muted = true;
-      video.playsInline = true;
-      let stopped = false;
-      let frameId = 0;
-      let framePending = false;
-      let lastCaptureMs = Number.NEGATIVE_INFINITY;
-      const sensorFrames = new SensorFrameHomography(calibration.intrinsics);
-
-      const capture = async (timestampMs: number) => {
-        if (
-          stopped ||
-          framePending ||
-          timestampMs - lastCaptureMs < 80 ||
-          video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA
-        ) {
-          frameId = requestAnimationFrame(capture);
-          return;
-        }
-        framePending = true;
-        lastCaptureMs = timestampMs;
-        try {
-          const frame = await createImageBitmap(video);
-          if (stopped) frame.close();
-          else {
-            const currentCameraRotation = readCameraRotation();
-            const sensorHomography =
-              currentCameraRotation
-                ? sensorFrames.next(currentCameraRotation)
-                : IDENTITY_MAT3;
-            listener({ frame, timestampMs, sensorHomography,
-              onAccepted: () => { if (currentCameraRotation) sensorFrames.commit(currentCameraRotation); }
-            });
-          }
-        } catch (error) {
-          if (!stopped) {
-            onError?.(
-              error instanceof Error ? error.message : "Camera frame capture failed."
-            );
-          }
-        } finally {
-          framePending = false;
-          if (!stopped) frameId = requestAnimationFrame(capture);
-        }
-      };
-
-      void video
-        .play()
-        .then(() => {
-          if (!stopped) frameId = requestAnimationFrame(capture);
-        })
-        .catch((error: unknown) => {
-          onError?.(
-            error instanceof Error ? error.message : "Camera playback could not start."
-          );
-        });
-
-      return () => {
-        stopped = true;
-        cancelAnimationFrame(frameId);
-        video.srcObject = null;
-      };
-    }
+function createBrowserMotionSource(calibration:GroundCalibration):NonNullable<NavigationSessionAdapters["motion"]>{
+ return {subscribe(listener){
+  const onMotion=(event:DeviceMotionEvent)=>{
+   const r=event.rotationRate;if(!r||![r.alpha,r.beta,r.gamma].every(v=>typeof v==="number"&&Number.isFinite(v)))return;
+   const angle=resolveDisplayRotation(readScreenOrientationAngle(),calibration.intrinsics.imageWidthPx,calibration.intrinsics.imageHeightPx,window.innerWidth,window.innerHeight)*Math.PI/180;
+   // Device rates beta/gamma/alpha are X/Y/Z. Rear camera axes are X/-Y/-Z;
+   // camera-from-world attitude changes with the negative camera angular rate.
+   const x=-r.beta!*Math.PI/180,y=r.gamma!*Math.PI/180,z=r.alpha!*Math.PI/180;
+   listener({rate:[Math.cos(angle)*x-Math.sin(angle)*y,Math.sin(angle)*x+Math.cos(angle)*y,z],timestampMs:eventMonotonicTime(event.timeStamp,performance.now())});
   };
+  window.addEventListener("devicemotion",onMotion);return ()=>window.removeEventListener("devicemotion",onMotion);
+ }};
 }
-
-function cameraRotation(matrix: Mat4): Mat3 {
-  return [
-    matrix[0], matrix[1], matrix[2],
-    matrix[4], matrix[5], matrix[6],
-    matrix[8], matrix[9], matrix[10]
-  ];
+export function eventMonotonicTime(timestamp:number,now:number):number{
+ const t=timestamp>1e12?timestamp-performance.timeOrigin:timestamp;
+ return Number.isFinite(t)&&t>0&&t<=now+5&&now-t<1000?t:now;
+}
+function createBrowserFrameSource(readVideo:()=>HTMLVideoElement|null,calibration:GroundCalibration,captureBitmaps=true):NavigationSessionAdapters["frames"]{
+ return {subscribe(listener){
+  let stopped=false,pending=false,lastCapture=-Infinity,callback=0,lastMedia=-Infinity;
+  let scheduledVideo:HTMLVideoElement|null=null,lastVideo:HTMLVideoElement|null=null;
+  const timeline=new CameraFrameTimeline();
+  const schedule=()=>{
+   if(stopped)return;
+   const video=readVideo();scheduledVideo=video;
+   if(video&&typeof video.requestVideoFrameCallback==="function")callback=video.requestVideoFrameCallback(capture);
+   else callback=requestAnimationFrame(now=>capture(now));
+  };
+  const capture=(now:number,metadata?:VideoFrameCallbackMetadata)=>{
+   if(stopped)return;
+   const video=readVideo();const sourceVideo=scheduledVideo;
+   schedule();
+   if(video!==sourceVideo)return;
+   if(video!==lastVideo){timeline.reset();lastMedia=-Infinity;lastVideo=video;}
+   if(!video||video.readyState<HTMLMediaElement.HAVE_CURRENT_DATA)return;
+   if(!metadata&&video.currentTime===lastMedia)return;
+   lastMedia=video.currentTime;
+   const source=metadata as (VideoFrameCallbackMetadata&{captureTime?:number})|undefined;
+   const stamp=timeline.stamp({nowMs:now,captureTime:source?.captureTime,expectedDisplayTime:metadata?.expectedDisplayTime,width:video.videoWidth||calibration.intrinsics.imageWidthPx,height:video.videoHeight||calibration.intrinsics.imageHeightPx,orientation:readScreenOrientationAngle()});
+   // Publish/freeze the displayed frame pose BEFORE asynchronous bitmap creation.
+   listener({frame:null,timestampMs:stamp.imageTimeMs,sensorHomography:IDENTITY_MAT3,stamp});
+   if(!captureBitmaps)return;
+   if(pending||now-lastCapture<STABILIZATION_CONFIG.captureIntervalMs)return;
+   pending=true;lastCapture=now;
+   void createImageBitmap(video).then(frame=>{
+    if(stopped)frame.close();else listener({frame,timestampMs:stamp.imageTimeMs,sensorHomography:IDENTITY_MAT3,stamp,bitmapDelayMs:performance.now()-now});
+   }).catch(()=>{ /* One capture failure is a missing measurement; the confidence watchdog handles silence. */ }).finally(()=>{pending=false;});
+  };
+  schedule();
+  return ()=>{stopped=true;if(scheduledVideo&&typeof scheduledVideo.cancelVideoFrameCallback==="function")scheduledVideo.cancelVideoFrameCallback(callback);else cancelAnimationFrame(callback);};
+ }};
 }
 
 class BrowserSessionTracker implements SessionTracker {
@@ -265,21 +245,23 @@ class BrowserSessionTracker implements SessionTracker {
   async start(callbacks: {
     onResult: Parameters<SessionTracker["start"]>[0]["onResult"];
     onUnavailable: Parameters<SessionTracker["start"]>[0]["onUnavailable"];
+    onDiscarded?:()=>void;
   }): Promise<void> {
     this.client = new TrackerClient({
       mainThreadFactory: loadOpenCvTracker,
       onResult: callbacks.onResult,
-      onUnavailable: callbacks.onUnavailable
+      onUnavailable: callbacks.onUnavailable,
+      onDiscarded: callbacks.onDiscarded
     });
     await this.client.start();
   }
 
-  submitFrame(frame: ImageBitmap, timestampMs: number, sensorHomography: Mat3): boolean {
+  submitFrame(frame: ImageBitmap, timestampMs: number, sensorHomography: Mat3, context?:TrackingFrameContext): boolean {
     if (!this.client) {
       frame.close();
       return false;
     }
-    return this.client.submitFrame(frame, timestampMs, sensorHomography);
+    return this.client.submitFrame(frame, timestampMs, sensorHomography, context);
   }
 
   dispose(): void {

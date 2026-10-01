@@ -119,11 +119,12 @@ export type GroundCalibration = {
   earthFromGroundAtLock?: Mat3;
   calibrationRouteDistanceMeters: number;
   lockedAtMs?: number;
+  manualAlignment?: {lateralMeters:number;yawRad:number};
   geographicYawValidated?: boolean;
   absoluteHeading?: AbsoluteHeading;
 };
 
-export type TrackingState = "locked" | "weak" | "realign";
+export type TrackingState = "locked" | "weak" | "recovering" | "realign";
 
 export type DeviceOrientationSample = {
   timestampMs: number;
@@ -152,6 +153,10 @@ export type VisualCorrection = {
 };
 
 export type PoseEstimate = {
+  /** Presentation output; the renderer never derives opacity from tracking states. */
+  overlayOpacity?: number;
+  renderIntrinsics?:CameraIntrinsics;
+  groundFromRoute?: Mat4;
   cameraPositionGroundMeters: [number, number, number];
   orientationQuaternion: [number, number, number, number];
   cameraFromGround: Mat4;

@@ -19,6 +19,8 @@ export type RouteRenderDiagnostics = {
   inFrontOfCamera: number;
   projected: number;
   visibleMarkers: number;
+  retainedMarkerCount?:number;
+  changedMarkerAnchors?:number;
   geometryMarkers: number;
   renderedMarkers: number;
   reason: "visible" | "no-route-ahead" | "invalid-transform" | "behind-camera" | "outside-viewport" | "tracking-realign" | "geographic-uncertain";
@@ -28,6 +30,7 @@ export type RouteGeometryBuffers = {
   positions: Float32Array;
   indices: Uint16Array;
   markerCount: number;
+  routeDistances?: Float32Array;
 };
 
 export type RouteView = {
@@ -38,6 +41,7 @@ export type RouteView = {
   screenWidthPx: number;
   screenHeightPx: number;
   overlayOpacity: number;
+  progressMeters?:number;
 };
 
 export type RouteRenderBackend = {
@@ -67,6 +71,8 @@ export class RouteRenderer {
   private lastGeometryProgressMeters: number | null = null;
   private screenWidthPx: number;
   private screenHeightPx: number;
+  private markerAnchors=new Map<string,string>();
+  private markerContinuity={retainedMarkerCount:0,changedMarkerAnchors:0};
   private ribbon: RouteRibbon | null = null;
   private disposed = false;
 
@@ -98,12 +104,16 @@ export class RouteRenderer {
       Math.abs(pose.routeProgressMeters - this.lastGeometryProgressMeters) >=
         this.geometryProgressThresholdMeters
     ) {
-      const ribbon = buildRouteRibbon(this.options.route, pose.routeProgressMeters);
+      const ribbon = buildRouteRibbon(this.options.route, pose.routeProgressMeters, {horizonPaddingMeters:2.5});
+      const nextAnchors=new Map<string,string>();this.markerContinuity.retainedMarkerCount=0;
+      for(const marker of ribbon.markers){const signature=Array.from(ribbon.positions.slice(marker.vertexOffset*3,(marker.vertexOffset+marker.vertexCount)*3)).join(",");nextAnchors.set(marker.id,signature);if(this.markerAnchors.has(marker.id)){this.markerContinuity.retainedMarkerCount++;if(this.markerAnchors.get(marker.id)!==signature)this.markerContinuity.changedMarkerAnchors++;}}
+      this.markerAnchors=nextAnchors;
       this.ribbon = ribbon;
       this.backend.updateGeometry({
         positions: ribbon.positions,
         indices: ribbon.indices,
-        markerCount: ribbon.markers.length
+        markerCount: ribbon.markers.length,
+        routeDistances: markerVertexDistances(ribbon)
       });
       this.lastGeometryProgressMeters = pose.routeProgressMeters;
     }
@@ -111,19 +121,15 @@ export class RouteRenderer {
     this.backend.updateView({
       cameraFromRoute: multiplyMat4(
         pose.cameraFromGround,
-        this.options.calibration.groundFromRoute
+        pose.groundFromRoute ?? this.options.calibration.groundFromRoute
       ),
-      intrinsics: this.options.calibration.intrinsics,
+      intrinsics: pose.renderIntrinsics??this.options.calibration.intrinsics,
       imageToScreen: this.imageToScreen,
       visualHomography: pose.visualCorrection.imageHomography,
       screenWidthPx: this.screenWidthPx,
       screenHeightPx: this.screenHeightPx,
-      overlayOpacity:
-        pose.geographicState !== "VALID" ? 0 : pose.quality.state === "locked"
-          ? 1
-          : pose.quality.state === "weak"
-            ? 0.5
-            : 0
+      overlayOpacity: pose.geographicState === "VALID" ? (pose.overlayOpacity ?? 0) : 0,
+      progressMeters: pose.routeProgressMeters
     });
     this.backend.render();
     return this.diagnostics(pose);
@@ -133,10 +139,10 @@ export class RouteRenderer {
     const result: RouteRenderDiagnostics = {
       routePointsAhead: this.ribbon?.markers.length ?? 0, transformed: 0,
       inFrontOfCamera: 0, projected: 0, visibleMarkers: 0,
-      geometryMarkers: this.ribbon?.markers.length ?? 0, renderedMarkers: 0, reason: "no-route-ahead"
+      ...this.markerContinuity,geometryMarkers: this.ribbon?.markers.length ?? 0, renderedMarkers: 0, reason: "no-route-ahead"
     };
-    const cameraFromRoute = multiplyMat4(pose.cameraFromGround, this.options.calibration.groundFromRoute);
-    const k = this.options.calibration.intrinsics;
+    const cameraFromRoute = multiplyMat4(pose.cameraFromGround, pose.groundFromRoute ?? this.options.calibration.groundFromRoute);
+    const k = pose.renderIntrinsics??this.options.calibration.intrinsics;
     for (const marker of this.ribbon?.markers ?? []) {
       const point = sampleRouteGroundPoint(this.options.route, marker.routeDistanceMeters);
       const camera = applyMat4ToPoint(cameraFromRoute, [point.rightMeters,point.upMeters + 0.025,point.forwardMeters]);
@@ -151,7 +157,7 @@ export class RouteRenderer {
       result.projected++;
       if (screen.xPx >= 0 && screen.xPx <= this.screenWidthPx && screen.yPx >= 0 && screen.yPx <= this.screenHeightPx) result.visibleMarkers++;
     }
-    result.renderedMarkers = pose.geographicState !== "VALID" || pose.quality.state === "realign" ? 0 : result.visibleMarkers;
+    result.renderedMarkers = (pose.geographicState === "VALID" ? (pose.overlayOpacity ?? 0) : 0) <= .01 ? 0 : result.visibleMarkers;
     result.reason = result.routePointsAhead === 0 ? "no-route-ahead" :
       result.transformed === 0 ? "invalid-transform" : result.inFrontOfCamera === 0 ? "behind-camera" :
       result.projected === 0 ? "invalid-transform" : result.visibleMarkers === 0 ? "outside-viewport" :
@@ -194,8 +200,17 @@ class ThreeRouteRenderBackend implements RouteRenderBackend {
   );
   private edgeGeometry = this.edges.geometry;
   private disposed = false;
+  private readonly progressUniform={value:0};
 
   constructor(canvas: HTMLCanvasElement) {
+    const fadeShader = (shader: THREE.WebGLProgramParametersWithUniforms) => {
+      shader.uniforms.routeProgress=this.progressUniform;
+      shader.vertexShader="attribute float routeDistance; varying float markerFade; uniform float routeProgress;\n"+shader.vertexShader;
+      shader.vertexShader=shader.vertexShader.replace("#include <begin_vertex>","#include <begin_vertex>\nmarkerFade = clamp((routeDistance-routeProgress-1.75)/1.25,0.0,1.0)*clamp((routeProgress+28.0-routeDistance)/2.5,0.0,1.0);");
+      shader.fragmentShader="varying float markerFade;\n"+shader.fragmentShader;
+      shader.fragmentShader=shader.fragmentShader.replace("#include <color_fragment>","#include <color_fragment>\ndiffuseColor.a *= markerFade;");
+    };
+    this.material.onBeforeCompile=fadeShader;this.edgeMaterial.onBeforeCompile=fadeShader;
     this.renderer = new THREE.WebGLRenderer({
       canvas,
       alpha: true,
@@ -218,16 +233,25 @@ class ThreeRouteRenderBackend implements RouteRenderBackend {
     this.renderer.setSize(widthPx, heightPx, false);
   }
 
-  updateGeometry({ positions, indices }: RouteGeometryBuffers): void {
+  updateGeometry({ positions, indices, routeDistances }: RouteGeometryBuffers): void {
+    const distances=routeDistances??new Float32Array(positions.length/3);
+    this.geometry.setAttribute("routeDistance",new THREE.BufferAttribute(distances,1));
     this.geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
     this.geometry.setIndex(new THREE.BufferAttribute(indices, 1));
     this.geometry.computeBoundingSphere();
     this.edgeGeometry.dispose();
     this.edgeGeometry = new THREE.EdgesGeometry(this.geometry, 20);
     this.edges.geometry = this.edgeGeometry;
+    const lookup=new Map<string,number>();
+    for(let i=0;i<distances.length;i++)lookup.set(`${positions[i*3]},${positions[i*3+1]},${positions[i*3+2]}`,distances[i]!);
+    const edgePositions=this.edgeGeometry.getAttribute("position");
+    const edgeDistances=new Float32Array(edgePositions.count);
+    for(let i=0;i<edgePositions.count;i++)edgeDistances[i]=lookup.get(`${edgePositions.getX(i)},${edgePositions.getY(i)},${edgePositions.getZ(i)}`)??0;
+    this.edgeGeometry.setAttribute("routeDistance",new THREE.BufferAttribute(edgeDistances,1));
   }
 
   updateView(view: RouteView): void {
+    this.progressUniform.value=view.progressMeters??0;
     this.mesh.visible = view.overlayOpacity > 0;
     this.edges.visible = view.overlayOpacity > 0;
     this.material.opacity = 0.94 * view.overlayOpacity;
@@ -343,3 +367,5 @@ function multiplyMat4(left: Mat4, right: Mat4): Mat4 {
 function clamp(value: number, minimum: number, maximum: number): number {
   return Math.min(maximum, Math.max(minimum, value));
 }
+
+function markerVertexDistances(ribbon:RouteRibbon):Float32Array{const distances=new Float32Array(ribbon.positions.length/3);for(const marker of ribbon.markers)distances.fill(marker.routeDistanceMeters,marker.vertexOffset,marker.vertexOffset+marker.vertexCount);return distances;}

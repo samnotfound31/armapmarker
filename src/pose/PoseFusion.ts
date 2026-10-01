@@ -7,7 +7,7 @@ import type {
   VisualCorrection
   , AbsoluteHeading
 } from "../domain/types";
-import { limitVisualResidual } from "../tracking/residualHomography";
+import { validateVisualResidual } from "../tracking/residualHomography";
 
 const IDENTITY_MAT3: Mat3 = [1, 0, 0, 0, 1, 0, 0, 0, 1];
 const EMPTY_QUALITY: TrackingQuality = {
@@ -101,7 +101,7 @@ export class PoseFusion {
     if (update.timestampMs <= this.lastVisualTimestampMs) return false;
     this.lastVisualTimestampMs = update.timestampMs;
     try {
-      const imageHomography = limitVisualResidual(update.imageHomography, {
+      const imageHomography = validateVisualResidual(update.imageHomography, {
         imageWidthPx: this.imageWidthPx,
         imageHeightPx: this.imageHeightPx,
         maxPointDisplacementPx: this.config.maxVisualDisplacementPx,
@@ -132,31 +132,7 @@ export class PoseFusion {
     if (!this.visual) {
       return { imageHomography: IDENTITY_MAT3, keyframeId: 0, timestampMs: nowMs };
     }
-    const ageMs = Math.max(0, nowMs - this.visual.timestampMs);
-    const ageWeight =
-      ageMs <= this.config.maxFreshVisualAgeMs
-        ? 1
-        : clamp(
-            1 -
-              (ageMs - this.config.maxFreshVisualAgeMs) /
-                this.config.visualFadeDurationMs,
-            0,
-            1
-          );
-    const qualityWeight =
-      this.visual.quality.state === "locked"
-        ? 1
-        : this.visual.quality.state === "weak"
-          ? this.config.weakVisualWeight
-          : 0;
-    return {
-      imageHomography: scaleProjectiveCorrection(
-        this.visual.imageHomography,
-        ageWeight * qualityWeight
-      ),
-      keyframeId: this.visual.keyframeId,
-      timestampMs: this.visual.timestampMs
-    };
+    return {imageHomography:this.visual.imageHomography,keyframeId:this.visual.keyframeId,timestampMs:this.visual.timestampMs};
   }
 
   private latestTimestamp(): number {
@@ -167,22 +143,6 @@ export class PoseFusion {
     );
     return Number.isFinite(latest) ? latest : 0;
   }
-}
-
-function scaleProjectiveCorrection(matrix: Mat3, weight: number): Mat3 {
-  if (weight <= 0) return IDENTITY_MAT3;
-  if (weight >= 1) return matrix;
-  return [
-    1 + (matrix[0] - 1) * weight,
-    matrix[1] * weight,
-    matrix[2] * weight,
-    matrix[3] * weight,
-    1 + (matrix[4] - 1) * weight,
-    matrix[5] * weight,
-    matrix[6] * weight,
-    matrix[7] * weight,
-    1
-  ];
 }
 
 function normalizeQuaternion(
@@ -212,8 +172,4 @@ function withCameraPosition(
     -(cameraFromGround[2] * x + cameraFromGround[6] * y + cameraFromGround[10] * z),
     1
   ];
-}
-
-function clamp(value: number, minimum: number, maximum: number): number {
-  return Math.min(maximum, Math.max(minimum, value));
 }

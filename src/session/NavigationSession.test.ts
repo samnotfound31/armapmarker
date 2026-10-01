@@ -136,9 +136,13 @@ describe("NavigationSession", () => {
     let now=1000; const epoch=Date.UTC(2026,8,29);
     const session=new NavigationSession({route:routePlan(),localRoute:localRoute(),groundRoute:groundRoute(),calibration:calibration(),
       clock:{epochNow:()=>epoch+now,monotonicNow:()=>now},adapters:fake.adapters,onUpdate,onUnavailable:vi.fn(),onArrived});
-    await session.start(); fake.emitTracker(tracked(1000,[1,0,0,0,1,0,25,0,1]));
-    now=1100; fake.emitLocation(fix(22.5701,epoch+now));
-    expect(onUpdate.mock.lastCall![0].pose.visualCorrection.imageHomography[6]).toBe(25);
+    await session.start();
+    fake.emitFrame({frame:{close:vi.fn()} as unknown as ImageBitmap,timestampMs:1000,sensorHomography:IDENTITY_MAT3});
+    fake.emitTracker({...tracked(1000,IDENTITY_MAT3),status:"initializing",visualHomography:null});
+    now=1050;fake.emitFrame({frame:{close:vi.fn()} as unknown as ImageBitmap,timestampMs:1050,sensorHomography:IDENTITY_MAT3});
+    fake.emitTracker(tracked(1050,[1,0,0,0,1,0,25,0,1]));
+    now=1100; fake.emitLocation({...fix(22.57,1100),timestampMs:epoch+now});
+    expect(onUpdate.mock.lastCall![0].pose.visualCorrection.imageHomography[6]).toBeCloseTo(25);
     const before=onUpdate.mock.lastCall![0].pose;
     now=1200; fake.emitLocation({...fix(22.571,epoch+now),accuracyMeters:100});
     expect(onUpdate.mock.lastCall![0].pose.cameraPositionGroundMeters).toEqual(before.cameraPositionGroundMeters);
@@ -169,8 +173,9 @@ describe("NavigationSession", () => {
     expect(onUpdate).toHaveBeenCalledOnce();
     fake.emitLocation(fix(22.5701,1000));
     fake.emitSensor({timestampMs:1010,cameraFromGround:IDENTITY_MAT4,orientationQuaternion:[0,0,0.1,0.995]});
-    expect(onUpdate).toHaveBeenCalledTimes(3);
-    expect(onUpdate.mock.lastCall![0].pose.orientationQuaternion[2]).toBeGreaterThan(0.09);
+    expect(onUpdate).toHaveBeenCalledTimes(2);
+    expect(session.renderPoseController.sample(1010).timestampMs).toBe(1010);
+
     session.stop();
     expect(fake.disposers[0]).toHaveBeenCalledOnce();
     expect(fake.disposers[1]).toHaveBeenCalledOnce();
@@ -198,12 +203,16 @@ describe("NavigationSession", () => {
 
     fake.emitLocation(fix(22.5701, 1000));
     const progressBeforeVisual = onUpdate.mock.lastCall?.[0].pose.routeProgressMeters;
+    fake.emitFrame({frame:{close:vi.fn()} as unknown as ImageBitmap,timestampMs:1000,sensorHomography:IDENTITY_MAT3});
+    fake.emitTracker({...tracked(1000,IDENTITY_MAT3),status:"initializing",visualHomography:null});
+    fake.emitFrame({frame:{close:vi.fn()} as unknown as ImageBitmap,timestampMs:1010,sensorHomography:IDENTITY_MAT3});
     fake.emitTracker(tracked(1010, [1, 0, 0, 0, 1, 0, 40, -10, 1]));
 
     expect(onUpdate.mock.lastCall?.[0].pose.routeProgressMeters).toBe(
       progressBeforeVisual
     );
-    expect(onUpdate.mock.lastCall?.[0].pose.visualCorrection.imageHomography[6]).toBe(40);
+    expect(session.renderPoseController.sample(1010).visualCorrection.imageHomography[6]).toBeCloseTo(40);
+    session.stop();
   });
 
   it("stops every source and tracker at arrival and ignores late callbacks", async () => {
@@ -232,7 +241,7 @@ describe("NavigationSession", () => {
     expect(onUpdate).toHaveBeenCalledTimes(updateCount);
   });
 
-  it("stops the unstable session when OpenCV becomes unavailable", async () => {
+  it("keeps camera/navigation alive and retries a transient tracker failure", async () => {
     const fake = createAdapters();
     const onUnavailable = vi.fn();
     const session = new NavigationSession({
@@ -248,8 +257,10 @@ describe("NavigationSession", () => {
     await session.start();
 
     fake.emitUnavailable("OpenCV failed to initialize");
-    expect(onUnavailable).toHaveBeenCalledWith("OpenCV failed to initialize");
+    expect(onUnavailable).not.toHaveBeenCalled();
     expect(fake.trackerDispose).toHaveBeenCalledOnce();
+    expect(fake.disposers.every(dispose=>dispose.mock.calls.length===0)).toBe(true);
+    session.stop();
   });
 
   it("keeps the calibration camera at the ground-frame origin on the first GPS fix", async () => {
@@ -359,7 +370,7 @@ describe("NavigationSession", () => {
     expect(onUpdate.mock.calls.every(([snapshot]) => snapshot.pose.routeProgressMeters === onUpdate.mock.calls[0]![0].pose.routeProgressMeters)).toBe(true);
   });
 
-  it("feeds lost tracker quality into the rendered pose immediately", async () => {
+  it("ignores a worker supplied REALIGN state and uses elapsed-time silence", async () => {
     const fake = createAdapters();
     const onUpdate = vi.fn();
     const session = new NavigationSession({
@@ -389,7 +400,9 @@ describe("NavigationSession", () => {
       }
     });
 
-    expect(onUpdate.mock.lastCall?.[0].pose.quality.state).toBe("realign");
+    expect(onUpdate.mock.lastCall?.[0].pose.quality.state).toBe("weak");
+    expect(session.renderPoseController.sample(3000).quality.state).toBe("realign");
+    session.stop();
   });
 });
 
@@ -438,7 +451,7 @@ function createAdapters() {
     emitLocation: (fix: LocationFix) => { monotonicMs=Math.max(monotonicMs,fix.timestampMs-TEST_EPOCH); locationListener?.(fix); },
     emitSensor: (update: SensorPoseUpdate) => sensorListener?.(update),
     emitFrame: (sample: FrameSample) => frameListener?.(sample),
-    emitTracker: (result: TrackerResult) => trackerListener?.(result),
+    emitTracker: (result: TrackerResult) => {monotonicMs=Math.max(monotonicMs,result.timestampMs);return trackerListener?.(result);},
     emitUnavailable: (message: string) => unavailableListener?.(message)
   };
 }

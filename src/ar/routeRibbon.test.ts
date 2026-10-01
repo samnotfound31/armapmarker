@@ -6,6 +6,20 @@ const STRAIGHT = [point(0, 0, 0), point(0, 20, 20), point(0, 40, 40)];
 const CURVE = [point(0, 0, 0), point(0, 20, 20), point(20, 20, 40)];
 
 describe("buildRouteRibbon", () => {
+  it("keeps each marker's vertices and kind fixed when the window advances", () => {
+    const before = buildRouteRibbon(CURVE, 0);
+    const after = buildRouteRibbon(CURVE, 1.2);
+    for (const marker of after.markers) {
+      const original = before.markers.find((candidate) => candidate.id === marker.id);
+      if (!original) continue;
+      expect(marker.routeDistanceMeters).toBe(original.routeDistanceMeters);
+      expect(marker.kind).toBe(original.kind);
+      expect(Array.from(after.positions.slice(marker.vertexOffset * 3,
+        (marker.vertexOffset + marker.vertexCount) * 3))).toEqual(Array.from(before.positions.slice(
+        original.vertexOffset * 3, (original.vertexOffset + original.vertexCount) * 3)));
+    }
+    expect(after.markers.some((marker) => before.markers.some((old) => old.id === marker.id))).toBe(true);
+  });
   it("samples only the interval ahead of progress up to the draw limit", () => {
     const ribbon = buildRouteRibbon(STRAIGHT, 5, {
       markerSpacingMeters: 5,
@@ -32,9 +46,9 @@ describe("buildRouteRibbon", () => {
     const curve = buildRouteRibbon(CURVE, 5, options);
 
     expect(straight.markers.map((marker) => marker.kind)).toEqual([
-      "arrow",
       "bar",
-      "arrow"
+      "arrow",
+      "bar"
     ]);
     expect(curve.positions.length).toBe(straight.positions.length);
     expect(curve.indices.length).toBe(straight.indices.length);

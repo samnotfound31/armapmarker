@@ -23,6 +23,8 @@ async function handleMessage(message: TrackerWorkerRequest): Promise<void> {
     return;
   }
 
+  if(message.type === "commit"){tracker?.commit(message.timestampMs,message.accepted,message.promote);return;}
+
   if (message.type === "dispose") {
     tracker?.dispose();
     tracker = null;
@@ -32,12 +34,14 @@ async function handleMessage(message: TrackerWorkerRequest): Promise<void> {
 
   try {
     if (!tracker) throw new Error("OpenCV tracker is not ready.");
+    const started=performance.now();
     const result = await tracker.process(
       message.frame,
       message.timestampMs,
-      message.sensorHomography
+      message.sensorHomography,
+      message.context
     );
-    post({ type: "result", result });
+    post({ type: "result", result:{...result,processingMs:performance.now()-started} });
   } catch (error) {
     tracker?.dispose();
     tracker = null;

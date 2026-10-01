@@ -1,4 +1,7 @@
+import type { CameraFrameStamp } from "../session/CameraFrameTimeline";
 import type { Mat3, TrackingQuality } from "../domain/types";
+
+export type TrackingFrameContext = CameraFrameStamp & {nominalPlane: Mat3; nominalPoseRevision:number;roadRoiTopRatio?:number};
 
 export type TrackingObservation = {
   timestampMs: number;
@@ -20,11 +23,15 @@ export type TrackingThresholds = {
   realignConsecutiveFrames: number;
   recoveryConsecutiveFrames: number;
   maxResultAgeMs: number;
+  acquisitionFrames?: number;
+  acquisitionSpanMs?: number;
+  weakAfterMs?: number;
+  realignAfterMs?: number;
 };
 
 export type TrackingUpdateOutcome = {
   accepted: boolean;
-  reason: "accepted" | "stale";
+  reason: "accepted" | "stale" | "rejected";
   quality: TrackingQuality;
 };
 
@@ -34,6 +41,15 @@ export type TrackerResult = {
   keyframeId: number;
   visualHomography: Mat3 | null;
   quality: TrackingQuality;
+  context?: TrackingFrameContext;
+  referenceTimestampMs?: number;
+  promoteCandidate?: boolean;
+  originalFeatureCount?:number;
+  spatialCoverage?:number;
+  p90ReprojectionErrorPx?:number;
+  symmetricTransferErrorPx?:number;
+  sharpness?:number;
+  processingMs?:number;
 };
 
 export type TrackerWorkerRequest =
@@ -43,7 +59,9 @@ export type TrackerWorkerRequest =
       frame: ImageBitmap;
       timestampMs: number;
       sensorHomography: Mat3;
+      context?: TrackingFrameContext;
     }
+  | { type: "commit"; timestampMs: number; accepted: boolean; promote: boolean }
   | { type: "dispose" };
 
 export type TrackerWorkerResponse =

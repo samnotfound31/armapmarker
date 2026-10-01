@@ -73,26 +73,12 @@ describe("PoseFusion", () => {
     expect(snapshot.visualCorrection.imageHomography[6]).toBeCloseTo(40);
   });
 
-  it("fades weak and stale visual corrections smoothly to identity", () => {
-    const fusion = new PoseFusion(testCalibration());
-    fusion.updateVisual({
-      timestampMs: 1000,
-      keyframeId: 1,
-      imageHomography: TRANSLATED,
-      quality: WEAK_QUALITY
-    });
-
-    const weak = fusion.snapshot(1000).visualCorrection.imageHomography[6];
-    const fading = fusion.snapshot(1500).visualCorrection.imageHomography[6];
-    const stale = fusion.snapshot(1800).visualCorrection.imageHomography;
-    expect(weak).toBeGreaterThan(0);
-    expect(weak).toBeLessThan(40);
-    expect(fading).toBeGreaterThan(0);
-    expect(fading).toBeLessThan(weak);
-    expect(stale).toEqual(IDENTITY_MAT3);
+  it("retains weak and stale registration without animating geometry to identity",()=>{
+    const fusion=new PoseFusion(testCalibration());fusion.updateVisual({timestampMs:1000,keyframeId:1,imageHomography:TRANSLATED,quality:WEAK_QUALITY});
+    expect(fusion.snapshot(1800).visualCorrection.imageHomography).toEqual(TRANSLATED);
   });
 
-  it("preserves scale, shear, and projective terms while weighting a weak correction", () => {
+  it("preserves scale, shear, and projective terms without weighting geometry by confidence", () => {
     const projective: Mat3 = [
       1.02, 0.01, 0.0001,
       0.02, 0.98, -0.00005,
@@ -112,17 +98,7 @@ describe("PoseFusion", () => {
       quality: WEAK_QUALITY
     });
 
-    expect(fusion.snapshot(1000).visualCorrection.imageHomography).toEqual([
-      expect.closeTo(1.009),
-      expect.closeTo(0.0045),
-      expect.closeTo(0.000045),
-      expect.closeTo(0.009),
-      expect.closeTo(0.991),
-      expect.closeTo(-0.0000225),
-      expect.closeTo(5.4),
-      expect.closeTo(-3.6),
-      expect.closeTo(1)
-    ]);
+    expect(fusion.snapshot(1000).visualCorrection.imageHomography).toEqual(projective);
   });
 
   it("bounds full-image correction and rejects out-of-order updates", () => {
@@ -140,7 +116,7 @@ describe("PoseFusion", () => {
         imageHomography: visual,
         quality: LOCKED_QUALITY
       })
-    ).toBe(true);
+    ).toBe(false);
     expect(
       fusion.updateVisual({
         timestampMs: 999,
@@ -162,7 +138,7 @@ describe("PoseFusion", () => {
       expect(Math.hypot(transformed.xPx - point.xPx, transformed.yPx - point.yPx))
         .toBeLessThanOrEqual(80.001);
     }
-    expect(Math.atan2(matrix[1], matrix[0])).toBeGreaterThan(0);
+    expect(matrix).toEqual(IDENTITY_MAT3);
   });
 });
 

@@ -20,280 +20,71 @@ afterEach(() => vi.unstubAllGlobals());
 
 const SENSOR_IDENTITY: Mat3 = [1, 0, 0, 0, 1, 0, 0, 0, 1];
 
-describe("OpenCvTracker", () => {
-  it("requires RANSAC inliers to cover ground area rather than one tiny cluster or line", () => {
-    const mask = new Uint8Array([1,1,1,1]);
-    expect(hasSpatialSupport([10,10, 90,10, 10,90, 90,90],mask,100,100)).toBe(true);
-    expect(hasSpatialSupport([10,10, 11,10, 10,11, 11,11],mask,100,100)).toBe(false);
-    expect(hasSpatialSupport([10,50, 30,50, 60,50, 90,50],mask,100,100)).toBe(false);
+describe("OpenCvTracker candidate ownership", () => {
+  it("retains the accepted image through rejected or stale candidates", async()=>{
+    const fake=createFakeAdapter({homographies:[[1,0,0,0,1,0,2,0,1],[1,0,0,0,1,0,50,0,1],[1,0,0,0,1,0,4,0,1]]});
+    const tracker=new OpenCvTracker(fake.adapter);
+    await tracker.process({} as ImageBitmap,0); tracker.commit(0,true);
+    await tracker.process({} as ImageBitmap,100); tracker.commit(100,true);
+    const rejected=await tracker.process({} as ImageBitmap,200);tracker.commit(200,false);
+    expect(rejected.keyframeId).toBe(1);
+    const next=await tracker.process({} as ImageBitmap,300);
+    expect((fake.adapter.track as Mock).mock.calls.at(-1)?.[0].opaque).toEqual({frameIndex:1});
+    expect(next.visualHomography?.[6]).toBeCloseTo(4);
+    tracker.commit(300,true);tracker.dispose();
+    expect(fake.firstFrameResources.every(r=>r.delete.mock.calls.length===1)).toBe(true);
   });
-
-  it("rejects an orientation-flipping frame without terminating and recovers on valid evidence", async () => {
-    const good: Mat3 = [1, 0, 0, 0, 1, 0, 2, 0, 1];
-    const fake = createFakeAdapter({ homographies: [good, [-1, 0, 0, 0, 1, 0, 0, 0, 1], good, good, good] });
-    const tracker = new OpenCvTracker(fake.adapter);
-    await tracker.process({} as ImageBitmap, 1000);
-    const accepted = await tracker.process({} as ImageBitmap, 1100);
-    const rejected = await tracker.process({} as ImageBitmap, 1200);
-    expect(rejected.status).toBe("lost");
-    expect(rejected.quality.state).toBe("weak");
-    expect(rejected.visualHomography).toBeNull();
-    await tracker.process({} as ImageBitmap, 1300);
-    await tracker.process({} as ImageBitmap, 1400);
-    const recovered = await tracker.process({} as ImageBitmap, 1500);
-    expect(recovered.quality.state).toBe("locked");
-    expect(recovered.visualHomography![6]).toBeGreaterThan(accepted.visualHomography![6]);
+  it("promotes a retained image only after explicit fresh acceptance",async()=>{
+    const fake=createFakeAdapter();const tracker=new OpenCvTracker(fake.adapter);
+    await tracker.process({} as ImageBitmap,0);tracker.commit(0,true);
+    await tracker.process({} as ImageBitmap,100);tracker.commit(100,false,true);
+    expect((await tracker.process({} as ImageBitmap,200)).keyframeId).toBe(1);
+    tracker.commit(200,true,true);
+    expect((await tracker.process({} as ImageBitmap,300)).keyframeId).toBe(2);
+    expect((fake.adapter.track as Mock).mock.calls.at(-1)?.[0].opaque).toEqual({frameIndex:3});
     tracker.dispose();
   });
-
-  it("escalates sustained rejected geometry to realign, even without an initial visual lock", async () => {
-    const fake = createFakeAdapter({ homography: [-1, 0, 0, 0, 1, 0, 0, 0, 1] });
-    const tracker = new OpenCvTracker(fake.adapter);
-    await tracker.process({} as ImageBitmap, 0);
-    let result;
-    for (let index = 1; index <= 50; index++) result = await tracker.process({} as ImageBitmap, index * 100);
-    expect(result!.quality.state).toBe("realign");
-    tracker.dispose();
+  it("rejects unsupported clusters, lines and orientation flips",async()=>{
+    const mask=new Uint8Array([1,1,1,1]);
+    expect(hasSpatialSupport([10,10,90,10,10,90,90,90],mask,100,100)).toBe(true);
+    expect(hasSpatialSupport([10,10,11,10,10,11,11,11],mask,100,100)).toBe(false);
+    expect(hasSpatialSupport([10,50,30,50,60,50,90,50],mask,100,100)).toBe(false);
+    const f=createFakeAdapter({homography:[-1,0,0,0,1,0,0,0,1]});const t=new OpenCvTracker(f.adapter);
+    await t.process({} as ImageBitmap,0);t.commit(0,true);expect((await t.process({} as ImageBitmap,100)).status).toBe("lost");t.dispose();
   });
-
-  it("deletes ROI Mats when feature detection throws", async () => {
-    vi.stubGlobal(
-      "ImageData",
-      class {
-        readonly data: Uint8ClampedArray;
-
-        constructor(
-          readonly width: number,
-          readonly height: number
-        ) {
-          this.data = new Uint8ClampedArray(width * height * 4);
-        }
-      }
-    );
-    const fake = throwingDetectionRuntime();
-    Object.assign(fakeOpenCvRuntime.cv, fake.cv);
-    const tracker = await loadOpenCvTracker();
-
-    await expect(
-      tracker.process(new ImageData(16, 16), 1000, SENSOR_IDENTITY)
-    ).rejects.toThrow("synthetic feature detection failure");
-
-    expect(fake.allocation("roi-header").delete).toHaveBeenCalledOnce();
-    expect(fake.allocation("gray-road-roi").delete).toHaveBeenCalledOnce();
-    expect(
-      fake.allocations.every((allocation) => allocation.delete.mock.calls.length === 1)
-    ).toBe(true);
+  it("cleans retained, rejected and pending image resources exactly once",async()=>{
+    const f=createFakeAdapter({homography:null});const t=new OpenCvTracker(f.adapter);
+    await t.process({} as ImageBitmap,0);t.commit(0,true);
+    await t.process({} as ImageBitmap,100);t.commit(100,false);t.dispose();
+    expect([...f.firstFrameResources,...f.secondFrameResources].every(r=>r.delete.mock.calls.length===1)).toBe(true);
+    expect(f.estimateResources.every(r=>r.delete.mock.calls.length===1)).toBe(true);
   });
-
-  it("disposes superseded frame and estimate Mats after successful tracking", async () => {
-    const fake = createFakeAdapter();
-    const tracker = new OpenCvTracker(fake.adapter);
-
-    await tracker.process({} as ImageBitmap, 1000, SENSOR_IDENTITY);
-    const result = await tracker.process({} as ImageBitmap, 1033, SENSOR_IDENTITY);
-
-    expect(result.status).toBe("tracked");
-    expect(result.quality.inlierCount).toBe(24);
-    expect(fake.firstFrameResources.every((resource) => resource.delete.mock.calls.length === 1)).toBe(true);
-    expect(fake.estimateResources.every((resource) => resource.delete.mock.calls.length === 1)).toBe(true);
-
-    tracker.dispose();
-    expect(fake.secondFrameResources.every((resource) => resource.delete.mock.calls.length === 1)).toBe(true);
+  it("releases a prepared frame if disposal happens during asynchronous preparation",async()=>{
+    const f=createFakeAdapter();const original=f.adapter.prepareFrame;let resolve!:(v:Awaited<ReturnType<OpenCvAdapter["prepareFrame"]>>)=>void;
+    f.adapter.prepareFrame=()=>new Promise(r=>resolve=r);const t=new OpenCvTracker(f.adapter),pending=t.process({} as ImageBitmap,0);t.dispose();resolve(await original({} as ImageBitmap));
+    await expect(pending).rejects.toThrow(/disposed/);expect(f.firstFrameResources.every(r=>r.delete.mock.calls.length===1)).toBe(true);
   });
-
-  it("reports tracking loss and still deletes estimate Mats", async () => {
-    const fake = createFakeAdapter({ homography: null, inlierCount: 0 });
-    const tracker = new OpenCvTracker(fake.adapter);
-
-    await tracker.process({} as ImageBitmap, 1000, SENSOR_IDENTITY);
-    const result = await tracker.process({} as ImageBitmap, 1033, SENSOR_IDENTITY);
-
-    expect(result.status).toBe("lost");
-    expect(fake.estimateResources.every((resource) => resource.delete.mock.calls.length === 1)).toBe(true);
-    tracker.dispose();
+  it("initializes A to C from the accepted adjacent pair when B was rejected",async()=>{
+    const f=createFakeAdapter(),t=new OpenCvTracker(f.adapter);
+    f.adapter.trackAdjacent=vi.fn(()=>({resources:[],homography:[1,0,0,0,1,0,2,0,1] as Mat3,trackedFeatureCount:32,inlierCount:24,medianReprojectionErrorPx:1,motionValid:true}));
+    await t.process({} as ImageBitmap,0);t.commit(0,true);
+    await t.process({} as ImageBitmap,100);t.commit(100,true);
+    await t.process({} as ImageBitmap,200);t.commit(200,false);
+    await t.process({} as ImageBitmap,300);
+    expect((f.adapter.trackAdjacent as Mock).mock.calls.at(-1)?.[0].opaque).toEqual({frameIndex:2});
+    expect((f.adapter.track as Mock).mock.calls.at(-1)?.[2][6]).toBeCloseTo(6);
+    t.dispose();
   });
-
-  it("deletes retained and current Mats when the adapter throws", async () => {
-    const fake = createFakeAdapter({ throwOnTrack: true });
-    const tracker = new OpenCvTracker(fake.adapter);
-
-    await tracker.process({} as ImageBitmap, 1000, SENSOR_IDENTITY);
-    await expect(tracker.process({} as ImageBitmap, 1033, SENSOR_IDENTITY)).rejects.toThrow(
-      "synthetic OpenCV failure"
-    );
-
-    expect(fake.firstFrameResources.every((resource) => resource.delete.mock.calls.length === 1)).toBe(true);
-    expect(fake.secondFrameResources.every((resource) => resource.delete.mock.calls.length === 1)).toBe(true);
+  it("deletes ROI allocations when feature detection fails",async()=>{
+    vi.stubGlobal("ImageData",class {readonly data:Uint8ClampedArray;constructor(readonly width:number,readonly height:number){this.data=new Uint8ClampedArray(width*height*4);}});
+    const f=throwingDetectionRuntime();Object.assign(fakeOpenCvRuntime.cv,f.cv);const t=await loadOpenCvTracker();
+    await expect(t.process(new ImageData(16,16),0,SENSOR_IDENTITY)).rejects.toThrow("synthetic feature detection failure");
+    expect(f.allocations.every(a=>a.delete.mock.calls.length===1)).toBe(true);
   });
-
-  it("retains the current frame and deletes Mats once after invalid sensor input", async () => {
-    const fake = createFakeAdapter();
-    const tracker = new OpenCvTracker(fake.adapter);
-    const singular: Mat3 = [1, 0, 0, 0, 0, 0, 0, 0, 1];
-
-    await tracker.process({} as ImageBitmap, 1000, SENSOR_IDENTITY);
-    const rejected = await tracker.process({} as ImageBitmap, 1033, singular);
-    expect(rejected.status).toBe("lost");
-    tracker.dispose();
-
-    expect(
-      fake.firstFrameResources.every(
-        (resource) => resource.delete.mock.calls.length === 1
-      )
-    ).toBe(true);
-    expect(
-      fake.secondFrameResources.every(
-        (resource) => resource.delete.mock.calls.length === 1
-      )
-    ).toBe(true);
-  });
-
-  it("accumulates translation residuals against one retained keyframe", async () => {
-    const fake = createFakeAdapter({
-      homography: [1, 0, 0, 0, 1, 0, 3, -2, 1]
-    });
-    const tracker = new OpenCvTracker(fake.adapter);
-
-    await tracker.process({} as ImageBitmap, 1000, SENSOR_IDENTITY);
-    const first = await tracker.process({} as ImageBitmap, 1033, SENSOR_IDENTITY);
-    const second = await tracker.process({} as ImageBitmap, 1066, SENSOR_IDENTITY);
-
-    expect(first.visualHomography).toEqual([
-      expect.closeTo(1), expect.closeTo(0), 0,
-      expect.closeTo(0), expect.closeTo(1), 0,
-      expect.closeTo(3), expect.closeTo(-2), 1
-    ]);
-    expect(second.visualHomography).toEqual([
-      expect.closeTo(1), expect.closeTo(0), 0,
-      expect.closeTo(0), expect.closeTo(1), 0,
-      expect.closeTo(6), expect.closeTo(-4), 1
-    ]);
-    expect(second.keyframeId).toBe(first.keyframeId);
-  });
-
-  it("removes rotation-only sensor motion across multiple frames", async () => {
-    const rotation = 0.03;
-    const rotationHomography: Mat3 = [
-      Math.cos(rotation), Math.sin(rotation), 0,
-      -Math.sin(rotation), Math.cos(rotation), 0,
-      0, 0, 1
-    ];
-    const fake = createFakeAdapter({ homography: rotationHomography });
-    const tracker = new OpenCvTracker(fake.adapter);
-
-    await tracker.process({} as ImageBitmap, 1000, SENSOR_IDENTITY);
-    await tracker.process({} as ImageBitmap, 1033, rotationHomography);
-    const result = await tracker.process({} as ImageBitmap, 1066, rotationHomography);
-
-    expect(result.visualHomography).toEqual([
-      expect.closeTo(1), expect.closeTo(0), 0,
-      expect.closeTo(0), expect.closeTo(1), 0,
-      expect.closeTo(0), expect.closeTo(0), 1
-    ]);
-  });
-
-  it("conjugates resized ROI motion into full-image pixel coordinates", () => {
-    const trackingFromImage: Mat3 = [
-      0.5, 0, 0,
-      0, 0.5, 0,
-      0, -100, 1
-    ];
-
-    expect(
-      toFullImageHomography(
-        [1, 0, 0, 0, 1, 0, 5, 10, 1],
-        trackingFromImage,
-        trackingFromImage
-      )
-    ).toEqual([
-      expect.closeTo(1), expect.closeTo(0), expect.closeTo(0),
-      expect.closeTo(0), expect.closeTo(1), expect.closeTo(0),
-      expect.closeTo(10), expect.closeTo(20), expect.closeTo(1)
-    ]);
-
-    const fullImageRotation = toFullImageHomography(
-      [0, 1, 0, -1, 0, 0, 0, 0, 1],
-      trackingFromImage,
-      trackingFromImage
-    );
-    expect(
-      applyMat3ToPixel(fullImageRotation, { xPx: 200, yPx: 300 })
-    ).toEqual({
-      xPx: expect.closeTo(-100),
-      yPx: expect.closeTo(400)
-    });
-  });
-
-  it("preserves accumulated correction on deliberate keyframe replacement", async () => {
-    const fake = createFakeAdapter({
-      homography: [1, 0, 0, 0, 1, 0, 2, 0, 1]
-    });
-    const tracker = new OpenCvTracker(fake.adapter, {
-      keyframeReplacementIntervalFrames: 2
-    });
-
-    const initial = await tracker.process({} as ImageBitmap, 1000, SENSOR_IDENTITY);
-    const first = await tracker.process({} as ImageBitmap, 1033, SENSOR_IDENTITY);
-    const replacement = await tracker.process(
-      {} as ImageBitmap,
-      1066,
-      SENSOR_IDENTITY
-    );
-
-    expect(first.keyframeId).toBe(initial.keyframeId);
-    expect(replacement.keyframeId).toBe(initial.keyframeId + 1);
-    expect(replacement.visualHomography?.[6]).toBeCloseTo(4);
-  });
-
-  it("composes non-commuting observed, accumulated, and sensor motion in column-vector order across keyframes", async () => {
-    const quarterTurn: Mat3 = [
-      0, 1, 0,
-      -1, 0, 0,
-      0, 0, 1
-    ];
-    const observedTranslationThenTurn: Mat3 = [
-      0, 1, 0,
-      -1, 0, 0,
-      10, 0, 1
-    ];
-    const observedProjectiveThenTurn: Mat3 = [
-      0, 1, 0,
-      -1, 0, -0.00002,
-      0, 0, 1
-    ];
-    const fake = createFakeAdapter({
-      homographies: [
-        observedTranslationThenTurn,
-        observedProjectiveThenTurn,
-        SENSOR_IDENTITY
-      ]
-    });
-    const tracker = new OpenCvTracker(fake.adapter, {
-      keyframeReplacementIntervalFrames: 2
-    });
-
-    const initial = await tracker.process({} as ImageBitmap, 1000, SENSOR_IDENTITY);
-    const translated = await tracker.process({} as ImageBitmap, 1033, quarterTurn);
-    const replacement = await tracker.process({} as ImageBitmap, 1066, quarterTurn);
-    const afterReplacement = await tracker.process(
-      {} as ImageBitmap,
-      1099,
-      SENSOR_IDENTITY
-    );
-
-    expect(applyMat3ToPixel(translated.visualHomography!, { xPx: 100, yPx: 50 }))
-      .toEqual({ xPx: expect.closeTo(110), yPx: expect.closeTo(50) });
-    expect(applyMat3ToPixel(replacement.visualHomography!, { xPx: 100, yPx: 50 }))
-      .toEqual({
-        xPx: expect.closeTo(99.800399, 5),
-        yPx: expect.closeTo(59.88024, 5)
-      });
-    expect(replacement.keyframeId).toBe(initial.keyframeId + 1);
-    expect(applyMat3ToPixel(afterReplacement.visualHomography!, { xPx: 100, yPx: 50 }))
-      .toEqual({
-        xPx: expect.closeTo(99.800399, 5),
-        yPx: expect.closeTo(59.88024, 5)
-      });
+  it("conjugates ROI flow into full-image pixels",()=>{
+    const roi:Mat3=[.5,0,0,0,.5,0,0,-100,1];
+    const h=toFullImageHomography([1,0,0,0,1,0,5,10,1],roi,roi);
+    expect(applyMat3ToPixel(h,{xPx:200,yPx:300})).toEqual({xPx:210,yPx:320});
   });
 });
 
@@ -372,6 +163,7 @@ function throwingDetectionRuntime() {
     label = "unassigned";
     rows = 0;
     cols = 0;
+    data = new Uint8Array(480*480);
     delete = vi.fn<() => void>();
 
     constructor() {

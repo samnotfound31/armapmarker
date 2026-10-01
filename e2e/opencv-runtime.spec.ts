@@ -14,6 +14,7 @@ type RuntimeSmokeResult = {
     homography: readonly number[] | null;
   };
   cleanupVerified?: boolean;
+  sequence?:{frames:number;accepted:number;promotions:number;maximumResidualPx:number;maximumPromotionDeltaPx:number;recovered:boolean;changedMarkerAnchors:number;weakOpacity:number};
   error?: string;
 };
 
@@ -62,7 +63,7 @@ test("actual OpenCV adapter tracks a deterministic projective frame pair and cle
   });
   const result = await readResult(page);
   expect(result.status, result.error).toBe("tracked");
-  expect(result.trackerResult).toMatchObject({
+  expect(result.trackerResult,JSON.stringify(result.trackerResult)).toMatchObject({
     status: "tracked",
     featureCount: expect.any(Number),
     inlierCount: expect.any(Number)
@@ -93,7 +94,17 @@ test("actual OpenCV treats a textureless frame sequence as tracking loss, not a 
   await expect(page.locator("#runtime-status")).not.toHaveAttribute("data-status", "starting", { timeout: 90_000 });
   const result = await readResult(page);
   expect(result.status, result.error).toBe("tracked");
-  expect(result.trackerResult).toMatchObject({ status: "lost", featureCount: 0, inlierCount: 0, qualityState: "realign" });
+  expect(result.trackerResult,JSON.stringify(result.trackerResult)).toMatchObject({ status: "lost", featureCount: 0, inlierCount: 0, qualityState: "realign" });
   expect(result.cleanupVerified).toBe(true);
   expect(result.securityViolations).toEqual([]);
+});
+
+test("real planar walking sequence preserves registration across keyframes, bob and texture loss",async({page})=>{
+ test.setTimeout(120000);const errors:string[]=[];page.on("pageerror",e=>errors.push(e.message));page.on("console",msg=>{if(msg.type()==="error")errors.push(msg.text());});
+ await page.goto("/runtime-smoke.html?mode=planar-motion");await expect(page.locator("#runtime-status")).not.toHaveAttribute("data-status","starting",{timeout:90000});
+ const result=await readResult(page);expect(result.status,result.error).toBe("tracked");const sequence=result.sequence!;
+ expect(sequence.frames).toBe(50);expect(sequence.accepted,JSON.stringify(sequence)).toBeGreaterThan(30);expect(sequence.promotions).toBeGreaterThan(2);
+ expect(sequence.maximumResidualPx).toBeLessThan(6);expect(sequence.maximumPromotionDeltaPx).toBeLessThan(3);
+ expect(sequence.changedMarkerAnchors).toBe(0);expect(sequence.weakOpacity).toBeGreaterThan(0);expect(sequence.recovered).toBe(true);
+ expect(result.cleanupVerified).toBe(true);expect(result.securityViolations).toEqual([]);expect(errors).toEqual([]);
 });

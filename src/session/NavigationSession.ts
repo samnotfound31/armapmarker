@@ -1,3 +1,6 @@
+import { RenderPoseController } from "../pose/RenderPoseController";
+import { CameraFrameTimeline, type CameraFrameStamp } from "./CameraFrameTimeline";
+import type {TrackingFrameContext} from "../tracking/types";
 import type {
   GroundCalibration,
   GeoPoint,
@@ -28,7 +31,9 @@ import type { TrackerResult } from "../tracking/types";
 export type SensorPoseUpdate = FusionSensorPoseUpdate;
 
 export type FrameSample = {
-  frame: ImageBitmap;
+  frame: ImageBitmap | null;
+  stamp?: CameraFrameStamp;
+  bitmapDelayMs?:number;
   timestampMs: number;
   sensorHomography: Mat3;
   onAccepted?: () => void;
@@ -43,14 +48,17 @@ export type SessionSource<T> = {
 
 export type SessionTracker = {
   start(callbacks: {
-    onResult: (result: TrackerResult) => void;
+    onResult: (result: TrackerResult) => boolean | void;
     onUnavailable: (message: string) => void;
+    onDiscarded?:()=>void;
   }): Promise<void>;
-  submitFrame(frame: ImageBitmap, timestampMs: number, sensorHomography: Mat3): boolean;
+  submitFrame(frame: ImageBitmap, timestampMs: number, sensorHomography: Mat3, context?:TrackingFrameContext): boolean;
   dispose(): void;
 };
 
 export type NavigationSessionAdapters = {
+  bindVideo?: (video:HTMLVideoElement|null)=>void;
+  motion?:SessionSource<{rate:[number,number,number];timestampMs:number}>;
   location: SessionSource<LocationFix>;
   sensor: SessionSource<SensorPoseUpdate>;
   frames: SessionSource<FrameSample>;
@@ -98,9 +106,17 @@ const INITIAL_TRACKING_QUALITY: TrackingQuality = {
 
 export class NavigationSession {
   private readonly fusion: PoseFusion;
+  readonly renderPoseController:RenderPoseController;
+  private readonly fallbackTimeline=new CameraFrameTimeline();
+  private readonly submittedFrames=new Map<number,TrackingFrameContext>();
+  private displayedFrames=new Map<number,TrackingFrameContext>();
   private readonly engine: NavigationEngine;
   private readonly disposers: Array<() => void> = [];
   private active = false;
+  private retryTimer:ReturnType<typeof setTimeout>|null=null;
+  private restartCount=0;
+  private lastUiUpdate=-Infinity;
+  private lastUiKey="";
   private latestQuality = INITIAL_TRACKING_QUALITY;
   private latestNavigation: NavigationSnapshot | null = null;
   private readonly locationFilter = new AcceptedLocationFilter();
@@ -114,6 +130,7 @@ export class NavigationSession {
 
   constructor(private readonly options: NavigationSessionOptions) {
     this.fusion = new PoseFusion(options.calibration);
+    this.renderPoseController=new RenderPoseController(options.calibration);
     this.clock = options.clock ?? {
       epochNow: () => Date.now(),
       monotonicNow: () => performance.now()
@@ -133,6 +150,7 @@ export class NavigationSession {
       timestampMs: options.calibration.lockedAtMs ?? 0,
       geographicState: "LOCATION_UNCERTAIN"
     };
+    this.renderPoseController.setNavigation(progress,"LOCATION_UNCERTAIN");
     this.engine = new NavigationEngine(
       options.localRoute,
       options.route.steps,
@@ -156,17 +174,15 @@ export class NavigationSession {
       };
       subscribe(this.options.adapters.location, (fix) => this.handleLocation(fix));
       subscribe(this.options.adapters.sensor, (update) => this.handleSensor(update));
+      if(this.options.adapters.motion)subscribe(this.options.adapters.motion,update=>this.renderPoseController.updateRate(update.rate,update.timestampMs));
       const watchdog = setInterval(() => {
         if (this.active) this.emit(this.clock.monotonicNow());
       }, 250);
       this.disposers.push(() => clearInterval(watchdog));
       if (this.options.initialLocation) this.handleLocation(this.options.initialLocation);
       if (!this.active) return;
-      await this.options.adapters.tracker.start({
-        onResult: (result) => this.handleTrackerResult(result),
-        onUnavailable: (message) => this.handleUnavailable(message)
-      });
       subscribe(this.options.adapters.frames, (sample) => this.handleFrame(sample));
+      await this.startTracker();
     } catch (error) {
       const message = errorMessage(error, "Visual tracking could not start.");
       if (this.active) this.options.onUnavailable(message);
@@ -178,6 +194,7 @@ export class NavigationSession {
   stop(): void {
     if (!this.active && this.disposers.length === 0) return;
     this.active = false;
+    if(this.retryTimer)clearTimeout(this.retryTimer);this.retryTimer=null;
     for (const dispose of this.disposers.splice(0)) dispose();
     this.options.adapters.tracker.dispose();
   }
@@ -228,7 +245,7 @@ export class NavigationSession {
       this.options.calibration.groundFromRoute,
       [actualRoutePosition.rightMeters, 0, actualRoutePosition.forwardMeters]
     );
-    this.fusion.updateGps({
+    const poseUpdate={
       timestampMs: now,
       routeProgressMeters: navigation.routeProgressMeters,
       cameraPositionGroundMeters: [
@@ -236,7 +253,9 @@ export class NavigationSession {
         this.options.calibration.cameraHeightMeters,
         groundPosition[2]
       ]
-    });
+    } as const;
+    this.fusion.updateGps({...poseUpdate,cameraPositionGroundMeters:[...poseUpdate.cameraPositionGroundMeters]});
+    this.renderPoseController.updateGps({...poseUpdate,cameraPositionGroundMeters:[...poseUpdate.cameraPositionGroundMeters]},fix.accuracyMeters);
     const snapshot = this.emit(now);
     if (navigation.arrived && navigation.geographicState !== "ROUTE_MATCH_UNCERTAIN") {
       this.options.onArrived(snapshot);
@@ -250,36 +269,49 @@ export class NavigationSession {
       this.latestHeading = update.absoluteHeading;
       if (update.absoluteHeading.usable) this.geographicOrientationAvailable = true;
     }
+    this.renderPoseController.updateSensor(update);
     if (this.fusion.updateSensor(update) && this.latestNavigation) {
-      this.emit(this.clock.monotonicNow());
+      this.emit(this.clock.monotonicNow(),false);
     }
   }
 
-  private handleFrame(sample: FrameSample): void {
-    if (!this.active) {
-      sample.frame.close();
-      return;
-    }
-    const accepted = this.options.adapters.tracker.submitFrame(
-      sample.frame,
-      sample.timestampMs,
-      sample.sensorHomography
-    );
-    if (accepted) sample.onAccepted?.();
+  attachVideo(video:HTMLVideoElement|null){this.options.adapters.bindVideo?.(video);}
+  private handleFrame(sample:FrameSample){
+   if(!this.active){sample.frame?.close();return;}
+   const stamp=sample.stamp??this.fallbackTimeline.stamp({nowMs:sample.timestampMs,width:this.options.calibration.intrinsics.imageWidthPx,height:this.options.calibration.intrinsics.imageHeightPx,orientation:0});
+   let context=this.displayedFrames.get(stamp.frameId);
+   if(!context){
+    if(sample.stamp&&sample.frame){sample.frame.close();this.renderPoseController.noteDropped();return;}
+    context=this.renderPoseController.captureFrame(stamp);this.displayedFrames.set(stamp.frameId,context);
+    for(const [id,old]of this.displayedFrames)if(stamp.imageTimeMs-old.imageTimeMs>2000)this.displayedFrames.delete(id);
+   }
+   if(!sample.frame)return;
+   this.renderPoseController.noteTiming({bitmapDelayMs:sample.bitmapDelayMs??0});
+   const accepted=this.options.adapters.tracker.submitFrame(sample.frame,sample.timestampMs,sample.sensorHomography,context);
+   if(accepted){this.submittedFrames.set(sample.timestampMs,context);sample.onAccepted?.();}
+   else this.renderPoseController.noteDropped();
+   for(const [time]of this.submittedFrames)if(stamp.imageTimeMs-time>2000)this.submittedFrames.delete(time);
+  }
+  private async startTracker(){
+   try{await this.options.adapters.tracker.start({onResult:result=>this.handleTrackerResult(result),onUnavailable:message=>this.handleTrackerUnavailable(message),onDiscarded:()=>this.renderPoseController.noteDiscardedResult()});}
+   catch(error){this.handleTrackerUnavailable(errorMessage(error,"Visual tracking is recovering."));}
+  }
+  private handleTrackerUnavailable(message:string){
+   if(!this.active||this.retryTimer)return;
+   this.renderPoseController.visualUnavailable(message);this.options.adapters.tracker.dispose();
+   this.retryTimer=setTimeout(()=>{this.retryTimer=null;if(this.active)void this.startTracker();},Math.min(30000,1000*2**Math.min(5,this.restartCount++)));
   }
 
-  private handleTrackerResult(result: TrackerResult): void {
-    if (!this.active) return;
-    this.latestQuality = result.quality;
-    if (result.status === "tracked" && result.visualHomography) {
-      this.fusion.updateVisual({
-        imageHomography: result.visualHomography,
-        keyframeId: result.keyframeId,
-        timestampMs: result.timestampMs,
-        quality: result.quality
-      });
-    }
-    if (this.latestNavigation) this.emit(this.clock.monotonicNow());
+  private handleTrackerResult(result:TrackerResult):boolean{
+   if(!this.active)return false;
+   const context=result.context??this.submittedFrames.get(result.timestampMs);
+   const accepted=this.renderPoseController.acceptTracking({...result,context},this.clock.monotonicNow());
+   this.submittedFrames.delete(result.timestampMs);
+   const pose=this.renderPoseController.sample(this.clock.monotonicNow());this.latestQuality=pose.quality;
+   if(accepted)this.restartCount=0;
+   if(accepted&&result.status==="tracked")this.fusion.updateVisual({...pose.visualCorrection,quality:pose.quality});
+   if(this.latestNavigation)this.emit(this.clock.monotonicNow(),false);
+   return accepted;
   }
 
   private handleUnavailable(message: string): void {
@@ -288,7 +320,7 @@ export class NavigationSession {
     this.stop();
   }
 
-  private emit(timestampMs: number): NavigationRuntimeSnapshot {
+  private emit(timestampMs: number,force=true): NavigationRuntimeSnapshot {
     if (!this.latestNavigation) {
       throw new Error("Navigation state is unavailable before the first location fix.");
     }
@@ -300,6 +332,8 @@ export class NavigationSession {
     const geographicState = !locationUsable
       ? "LOCATION_UNCERTAIN"
       : this.latestNavigation.geographicState ?? "ROUTE_MATCH_UNCERTAIN";
+    this.renderPoseController.setNavigation(this.latestNavigation.routeProgressMeters,geographicState);
+    this.latestQuality=this.renderPoseController.sampleDisplayFrame(timestampMs).quality;
     const snapshot: NavigationRuntimeSnapshot = {
       pose: {
         ...this.fusion.snapshot(timestampMs),
@@ -323,7 +357,8 @@ export class NavigationSession {
         direction: this.routeDirection()
       }
     };
-    this.options.onUpdate(snapshot);
+    const key=`${geographicState}/${this.latestQuality.state}`;
+    if(force||timestampMs-this.lastUiUpdate>=200||key!==this.lastUiKey){this.options.onUpdate(snapshot);this.lastUiUpdate=timestampMs;this.lastUiKey=key;}
     return snapshot;
   }
 

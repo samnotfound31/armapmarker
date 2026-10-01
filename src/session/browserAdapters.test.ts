@@ -153,3 +153,28 @@ describe("browser location source", () => {
     expect(geolocation.clearWatch).toHaveBeenCalledWith(17);
   });
 });
+
+describe("displayed camera timeline",()=>{
+ const calibration:GroundCalibration={stage:"locked",cameraHeightMeters:1.4,intrinsics:buildApproximateIntrinsics(320,240),imageToScreen:IDENTITY,groundFromRoute:[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1],cameraFromGroundAtLock:[1,0,0,0,0,1,0,0,0,0,1,0,0,-1.4,0,1],calibrationRouteDistanceMeters:0};
+ it("stamps the displayed image before bitmap completion and closes late bitmaps",async()=>{
+  const video=document.createElement("video");let callback:VideoFrameRequestCallback=()=>undefined;
+  Object.defineProperties(video,{readyState:{value:2},videoWidth:{value:320},videoHeight:{value:240},currentTime:{value:1},requestVideoFrameCallback:{value:(cb:VideoFrameRequestCallback)=>{callback=cb;return 1;}},cancelVideoFrameCallback:{value:vi.fn()}});
+  let resolve!:(bitmap:ImageBitmap)=>void;vi.stubGlobal("createImageBitmap",vi.fn(()=>new Promise<ImageBitmap>(r=>resolve=r)));
+  const adapters=createBrowserNavigationAdapters({} as MediaStream,calibration);adapters.bindVideo?.(video);const frames:Parameters<Parameters<typeof adapters.frames.subscribe>[0]>[0][]=[];
+  const dispose=adapters.frames.subscribe(f=>frames.push(f));callback(100,{captureTime:90,expectedDisplayTime:110} as VideoFrameCallbackMetadata);
+  expect(frames[0]?.frame).toBeNull();expect(frames[0]?.stamp?.imageTimeMs).toBe(90);
+  callback(130,{captureTime:120,expectedDisplayTime:140} as VideoFrameCallbackMetadata);
+  const close=vi.fn();resolve({close} as unknown as ImageBitmap);await Promise.resolve();
+  expect(frames.at(-1)?.stamp).toBe(frames[0]?.stamp);expect(frames[1]?.stamp?.frameId).not.toBe(frames[0]?.stamp?.frameId);
+  dispose();expect(video.cancelVideoFrameCallback).toHaveBeenCalled();
+ });
+ it("fallback tracks only new video frames and releases a bitmap completed after stop",async()=>{
+  const video=document.createElement("video");let callback:FrameRequestCallback=()=>undefined;let media=1;
+  Object.defineProperties(video,{readyState:{value:2},videoWidth:{value:320},videoHeight:{value:240},currentTime:{get:()=>media},requestVideoFrameCallback:{value:undefined}});
+  vi.stubGlobal("requestAnimationFrame",(cb:FrameRequestCallback)=>{callback=cb;return 1;});vi.stubGlobal("cancelAnimationFrame",vi.fn());
+  let resolve!:(b:ImageBitmap)=>void;vi.stubGlobal("createImageBitmap",()=>new Promise<ImageBitmap>(r=>resolve=r));
+  const adapters=createBrowserNavigationAdapters({} as MediaStream,calibration);adapters.bindVideo?.(video);const receive=vi.fn();const stop=adapters.frames.subscribe(receive);
+  callback(100);callback(120);expect(receive).toHaveBeenCalledOnce();media=2;callback(140);expect(receive).toHaveBeenCalledTimes(2);
+  stop();const close=vi.fn();resolve({close} as unknown as ImageBitmap);await Promise.resolve();expect(close).toHaveBeenCalledOnce();expect(receive).toHaveBeenCalledTimes(2);
+ });
+});

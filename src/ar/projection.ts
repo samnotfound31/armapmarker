@@ -20,7 +20,7 @@ export function projectRoutePointToScreen(
   calibration: GroundCalibration,
   pose: PoseEstimate
 ): ScreenProjection | null {
-  const groundPoint = applyMat4ToPoint(calibration.groundFromRoute, [
+  const groundPoint = applyMat4ToPoint(pose.groundFromRoute ?? calibration.groundFromRoute, [
     routePoint.rightMeters,
     routePoint.upMeters,
     routePoint.forwardMeters
@@ -28,7 +28,7 @@ export function projectRoutePointToScreen(
   const imageProjection = projectGroundPoint(
     groundPoint,
     pose.cameraFromGround,
-    calibration.intrinsics
+    pose.renderIntrinsics??calibration.intrinsics
   );
   if (!imageProjection.visible) return null;
 

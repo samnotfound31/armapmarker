@@ -3,6 +3,7 @@ import type { RouteGroundPoint } from "../domain/types";
 export type RouteMarkerKind = "arrow" | "bar";
 
 export type RouteMarker = {
+  id: string;
   kind: RouteMarkerKind;
   routeDistanceMeters: number;
   widthMeters: number;
@@ -28,6 +29,7 @@ export type RouteRibbonOptions = {
   arrowLengthMeters: number;
   turnEmphasisFactor: number;
   turnThresholdRad: number;
+  horizonPaddingMeters?:number;
 };
 
 const DEFAULT_OPTIONS: Readonly<RouteRibbonOptions> = {
@@ -69,11 +71,11 @@ export function buildRouteRibbon(
   const positions: number[] = [];
   const indices: number[] = [];
   const markers: RouteMarker[] = [];
-  let markerIndex = 0;
+  let markerIndex = Math.max(0, Math.ceil((drawStart - (config.horizonPaddingMeters ? 1.25 : 0) - config.startAheadMeters) / config.markerSpacingMeters));
 
   for (
-    let distance = drawStart;
-    distance <= drawEnd + 1e-8;
+    let distance = config.startAheadMeters + markerIndex * config.markerSpacingMeters;
+    distance <= Math.min(routeEnd,drawEnd+(config.horizonPaddingMeters??0)) + 1e-8;
     distance += config.markerSpacingMeters
   ) {
     const sample = sampleRoute(route, distance);
@@ -97,6 +99,7 @@ export function buildRouteRibbon(
       appendBar(sample, width, config.barLengthMeters, positions, indices);
     }
     markers.push({
+      id: `route-marker-${markerIndex}`,
       kind,
       routeDistanceMeters: roundDistance(distance),
       widthMeters: width,

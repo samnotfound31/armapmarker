@@ -78,14 +78,15 @@ test("real MVP runtime completes search, route, calibration, tracking, re-align 
   await expect(page.getByText("Visual tracking locked", {exact:true})).toBeVisible();
   await page.evaluate(() => { window.__SYNTHETIC_DEVICE__.pitch = 77; window.__SYNTHETIC_DEVICE__.roll = 2; });
   await expect(page.getByLabel("AR diagnostics")).toContainText(/Rendered: [1-9]/);
-  // Sustained feature loss eventually offers the one-tap fallback.
+  // Sustained loss offers bounded trim without destroying the camera/session.
 
   await page.evaluate(() => { window.__SYNTHETIC_DEVICE__.textured = false; });
   await expect(page.getByRole("button", { name: "Re-align", exact: true })).toBeVisible({ timeout: 30_000 });
   await page.getByRole("button", { name: "Re-align", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Check the road view" })).toBeVisible();
+  await expect(page.getByRole("slider", { name: "Lateral alignment" })).toBeVisible();
   await page.evaluate(() => { window.__SYNTHETIC_DEVICE__.textured = true; });
-  await alignActualCalibration(page);
+  await page.getByRole("button",{name:"Lock alignment",exact:true}).click();
+  expect(await page.evaluate(()=>window.__SYNTHETIC_DEVICE__.cameraCalls)).toBe(1);
   await expect(page.getByText("Visual tracking locked", { exact: true })).toBeVisible({ timeout: 30_000 });
   await page.getByRole("button", { name: "Exit", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Where are you walking?" })).toBeVisible();

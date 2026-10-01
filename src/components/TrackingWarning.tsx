@@ -16,10 +16,10 @@ export function TrackingWarning({
   return (
     <aside className="tracking-warning" role="alert">
       <div>
-        <strong>{needsRealign ? "Alignment needs a fresh anchor" : "Recovering alignment"}</strong>
+        <strong>{needsRealign ? "Alignment needs recovery" : "Recovering alignment"}</strong>
         <p>
           {needsRealign
-            ? "Point along the path and tap the ground once to re-align."
+            ? "Keep textured ground in view while tracking reacquires. Adjust alignment if needed."
             : "Keep the path in view. Markers are approximate while tracking recovers."}
         </p>
       </div>

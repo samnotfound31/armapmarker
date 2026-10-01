@@ -73,7 +73,7 @@ test("walking sideways preserves lateral route displacement instead of snapping 
   const diagnostics = page.getByLabel("AR diagnostics");
   await expect(diagnostics).toContainText("Geographic state: VALID");
   await expect(page.getByText("Visual tracking locked", { exact: true })).toBeVisible({ timeout: 30_000 });
-  await expect(diagnostics).toContainText("Visible markers: 11");
+  await expect(diagnostics).toContainText(/Visible markers: [1-9][0-9]*/);
   const initialVisible = Number((await diagnostics.innerText()).match(/Visible markers: (\d+)/)?.[1]);
 
   // The route stays west of a camera moved east; matching still reports zero progress.

@@ -1,15 +1,12 @@
-import type { Mat3, TrackingQuality } from "../domain/types";
+import { STABILIZATION_CONFIG } from "../pose/stabilizationConfig";
+import type { Mat3 } from "../domain/types";
 import type { CV, Mat } from "@techstark/opencv-js";
-import { TrackingQualityGate } from "./quality";
 import {
-  assertVisualContinuity,
   invertHomography,
   multiplyHomographies,
-  normalizeHomography,
-  limitVisualResidual,
-  DEFAULT_VISUAL_RESIDUAL_LIMITS
+  normalizeHomography
 } from "./residualHomography";
-import type { TrackerResult } from "./types";
+import type { TrackerResult, TrackingFrameContext } from "./types";
 
 export type CvAllocation = {
   delete(): void;
@@ -21,6 +18,7 @@ export type PreparedCvFrame = {
   imageWidthPx: number;
   imageHeightPx: number;
   trackingFromImage: Mat3;
+  sharpness?: number;
   opaque: unknown;
 };
 
@@ -31,14 +29,20 @@ export type CvTrackEstimate = {
   inlierCount: number;
   medianReprojectionErrorPx: number;
   motionValid: boolean;
+  originalFeatureCount?:number;
+  spatialCoverage?:number;
+  p90ReprojectionErrorPx?:number;
+  symmetricTransferErrorPx?:number;
 };
 
 export type OpenCvAdapter = {
-  prepareFrame(frame: ImageBitmap | ImageData): PreparedCvFrame | Promise<PreparedCvFrame>;
+  prepareFrame(frame: ImageBitmap | ImageData, roadRoiTopRatio?:number): PreparedCvFrame | Promise<PreparedCvFrame>;
   track(
     previousFrame: PreparedCvFrame,
-    currentFrame: PreparedCvFrame
+    currentFrame: PreparedCvFrame,
+    initialImageHomography?:Mat3
   ): CvTrackEstimate | Promise<CvTrackEstimate>;
+  trackAdjacent?(previous:PreparedCvFrame,current:PreparedCvFrame):CvTrackEstimate|Promise<CvTrackEstimate>;
 };
 
 type OpenCvFrameOpaque = {
@@ -58,149 +62,79 @@ const OPENCV_CONFIG = {
 
 const IDENTITY_HOMOGRAPHY: Mat3 = [1, 0, 0, 0, 1, 0, 0, 0, 1];
 
-export type OpenCvTrackerConfig = {
-  keyframeReplacementIntervalFrames: number;
-};
-
-const DEFAULT_TRACKER_CONFIG: Readonly<OpenCvTrackerConfig> = {
-  keyframeReplacementIntervalFrames: 30
-};
-
+/** Image measurements are staged. Only an explicit fresh-result acknowledgement owns reference promotion. */
 export class OpenCvTracker {
-  private previousFrame: PreparedCvFrame | null = null;
-  private readonly qualityGate = new TrackingQualityGate();
-  private keyframeId = 1;
-  private framesSinceKeyframe = 0;
-  private keyframeBaseHomography: Mat3 = IDENTITY_HOMOGRAPHY;
-  private residualSinceKeyframe: Mat3 = IDENTITY_HOMOGRAPHY;
-  private disposed = false;
-
-  constructor(
-    private readonly adapter: OpenCvAdapter,
-    private readonly config: Readonly<OpenCvTrackerConfig> =
-      DEFAULT_TRACKER_CONFIG
-  ) {
-    if (config.keyframeReplacementIntervalFrames < 1) {
-      throw new RangeError("Keyframe replacement interval must be positive.");
+ private keyframe:PreparedCvFrame|null=null;
+ private keyframeTime=0;
+ private keyframeContext:TrackingFrameContext|undefined;
+ private previous:PreparedCvFrame|null=null;
+ private previousMapping:Mat3|null=null;
+ private keyframeId=1;
+ private pending:{frame:PreparedCvFrame;time:number;result:TrackerResult}|null=null;
+ private disposed=false;
+ constructor(private readonly adapter:OpenCvAdapter){}
+ async process(frame:ImageBitmap|ImageData,timestampMs:number,_sensorHomography?:Mat3,context?:TrackingFrameContext):Promise<TrackerResult>{
+  if(this.disposed)throw new Error("OpenCV tracker is disposed.");
+  if(this.pending)this.commit(this.pending.time,false);
+  const current=await this.adapter.prepareFrame(frame,context?.roadRoiTopRatio);
+  if(this.disposed){deleteAllocations(current.resources);throw new Error("OpenCV tracker is disposed.");}
+  if(context&&(current.imageWidthPx!==context.width||current.imageHeightPx!==context.height)){deleteAllocations(current.resources);return {status:"lost",timestampMs,keyframeId:this.keyframeId,context,visualHomography:null,quality:{state:"weak",featureCount:0,inlierCount:0,inlierRatio:0,medianReprojectionErrorPx:Infinity,rejectionReason:"image-dimensions-mismatch"}};}
+  const reference=this.keyframe;
+  let estimate:CvTrackEstimate|null=null;
+  let adjacent:CvTrackEstimate|null=null;
+  try{
+   let observed:Mat3|null=null;
+   const incompatible=reference&&context&&this.keyframeContext&&context.cameraGeneration!==this.keyframeContext.cameraGeneration;
+   const expired=reference&&(incompatible||timestampMs-this.keyframeTime>STABILIZATION_CONFIG.keyframeMaximumAgeMs);
+   const reacquire=expired&&current.candidateCount>=30&&(current.sharpness??10)>=5;
+   if(reference&&!reacquire){
+    let initializer:Mat3|undefined;
+    if(this.previous&&this.previous!==reference&&this.previousMapping&&this.adapter.trackAdjacent){
+     adjacent=await this.adapter.trackAdjacent(this.previous,current);
+     if(adjacent.motionValid&&adjacent.homography)initializer=multiplyHomographies(toFullImageHomography(adjacent.homography,this.previous.trackingFromImage,current.trackingFromImage),this.previousMapping);
     }
-  }
-
-  async process(
-    frame: ImageBitmap | ImageData,
-    timestampMs: number,
-    sensorHomography: Mat3 = IDENTITY_HOMOGRAPHY
-  ): Promise<TrackerResult> {
-    if (this.disposed) throw new Error("OpenCV tracker is disposed.");
-
-    const currentFrame = await this.adapter.prepareFrame(frame);
-    const previousFrame = this.previousFrame;
-    if (!previousFrame) {
-      this.previousFrame = currentFrame;
-      return {
-        status: "initializing",
-        timestampMs,
-        keyframeId: this.keyframeId,
-        visualHomography: null,
-        quality: initializingQuality(currentFrame.candidateCount)
-      };
+    if(!initializer&&context&&this.keyframeContext)initializer=multiplyHomographies(context.nominalPlane,invertHomography(this.keyframeContext.nominalPlane));
+    estimate=await this.adapter.track(reference,current,initializer);
+    if(estimate.motionValid&&estimate.homography&&estimate.inlierCount>=15&&estimate.trackedFeatureCount>=15&&estimate.inlierCount/estimate.trackedFeatureCount>=.55&&estimate.medianReprojectionErrorPx<=3){
+     try{
+      observed=toFullImageHomography(estimate.homography,reference.trackingFromImage,current.trackingFromImage);
+      invertHomography(observed);
+      if(observed[0]*observed[4]-observed[1]*observed[3]<=0)observed=null;
+     }catch(error){if(!(error instanceof RangeError))throw error;}
     }
-
-    let estimate: CvTrackEstimate | null = null;
-    try {
-      estimate = await this.adapter.track(previousFrame, currentFrame);
-      let accumulatedVisualHomography: Mat3 | null = null;
-      let rejectionReason = "insufficient-features";
-      const supported = estimate.motionValid && estimate.homography !== null &&
-        estimate.trackedFeatureCount >= 15 && estimate.inlierCount >= 15 &&
-        estimate.inlierCount / estimate.trackedFeatureCount >= 0.55 &&
-        estimate.medianReprojectionErrorPx <= 3;
-      if (supported) {
-        // Only validation failures are recoverable measurements. OpenCV/runtime
-        // allocation failures still propagate to the existing unavailable path.
-        try {
-          const observed = toFullImageHomography(estimate.homography!,
-            previousFrame.trackingFromImage, currentFrame.trackingFromImage);
-          const prior = normalizeHomography(multiplyHomographies(
-            this.residualSinceKeyframe, this.keyframeBaseHomography));
-          const candidate = normalizeHomography(
-            multiplyHomographies(observed, multiplyHomographies(prior, invertHomography(sensorHomography))));
-          assertVisualContinuity(candidate, prior, currentFrame.imageWidthPx, currentFrame.imageHeightPx);
-          accumulatedVisualHomography = limitVisualResidual(candidate, {
-            ...DEFAULT_VISUAL_RESIDUAL_LIMITS,
-            imageWidthPx: currentFrame.imageWidthPx,
-            imageHeightPx: currentFrame.imageHeightPx
-          });
-        } catch (error) {
-          if (!(error instanceof RangeError)) throw error;
-          rejectionReason = "invalid-homography";
-        }
-      }
-      const outcome = this.qualityGate.update({
-        timestampMs, candidateCount: estimate.trackedFeatureCount,
-        inlierCount: estimate.inlierCount,
-        medianReprojectionErrorPx: estimate.medianReprojectionErrorPx,
-        motionValid: accumulatedVisualHomography !== null
-      });
-      if (!accumulatedVisualHomography) {
-        // Move the optical-flow frame forward, but retain the last accepted
-        // correction. A rejected candidate must never poison that transform.
-        this.previousFrame = currentFrame;
-        deleteAllocations(previousFrame.resources);
-        return {
-          status: "lost", timestampMs, keyframeId: this.keyframeId,
-          visualHomography: null,
-          quality: { ...outcome.quality, visualUpdate: "rejected", rejectionReason }
-        };
-      }
-      let replacedKeyframe = false;
-      if (outcome.quality.state === "locked") {
-        this.framesSinceKeyframe += 1;
-        if (
-          this.framesSinceKeyframe >=
-            this.config.keyframeReplacementIntervalFrames
-        ) {
-          this.keyframeBaseHomography = accumulatedVisualHomography;
-          this.residualSinceKeyframe = IDENTITY_HOMOGRAPHY;
-          this.keyframeId += 1;
-          this.framesSinceKeyframe = 0;
-          replacedKeyframe = true;
-        }
-      }
-      if (!replacedKeyframe) {
-        this.residualSinceKeyframe = normalizeHomography(
-          multiplyHomographies(
-            accumulatedVisualHomography,
-            invertHomography(this.keyframeBaseHomography)
-          )
-        );
-      }
-      this.previousFrame = currentFrame;
-      deleteAllocations(previousFrame.resources);
-      return {
-        status: "tracked",
-        timestampMs,
-        keyframeId: this.keyframeId,
-        visualHomography: accumulatedVisualHomography,
-        quality: { ...outcome.quality, visualUpdate: "valid" }
-      };
-    } catch (error) {
-      this.previousFrame = null;
-      deleteAllocations(previousFrame.resources);
-      deleteAllocations(currentFrame.resources);
-      throw error;
-    } finally {
-      if (estimate) deleteAllocations(estimate.resources);
-    }
-  }
-
-  dispose(): void {
-    if (this.disposed) return;
-    this.disposed = true;
-    if (this.previousFrame) {
-      deleteAllocations(this.previousFrame.resources);
-      this.previousFrame = null;
-    }
-  }
+   }
+   const result:TrackerResult={context,status:reference&&!reacquire?(observed?"tracked":"lost"):"initializing",timestampMs,keyframeId:this.keyframeId+(reacquire?1:0),visualHomography:observed,
+    quality:{state:"weak",featureCount:estimate?.trackedFeatureCount??current.candidateCount,inlierCount:estimate?.inlierCount??0,inlierRatio:estimate&&estimate.trackedFeatureCount?estimate.inlierCount/estimate.trackedFeatureCount:0,medianReprojectionErrorPx:estimate?.medianReprojectionErrorPx??Infinity,visualUpdate:observed?"valid":reference?"rejected":"initializing",rejectionReason:reference&&!observed?"unsupported-ground-motion":undefined},
+    originalFeatureCount:estimate?.originalFeatureCount??reference?.candidateCount??current.candidateCount,
+    spatialCoverage:estimate?.spatialCoverage,
+    p90ReprojectionErrorPx:estimate?.p90ReprojectionErrorPx,
+    symmetricTransferErrorPx:estimate?.symmetricTransferErrorPx,
+    sharpness:current.sharpness,
+    referenceTimestampMs:reference?this.keyframeTime:timestampMs,
+    promoteCandidate:Boolean(observed&&timestampMs-this.keyframeTime>=STABILIZATION_CONFIG.keyframeMinimumAgeMs&&(current.sharpness??10)>=5&&estimate&&estimate.inlierCount>=20&&estimate.inlierCount/estimate.trackedFeatureCount>=.65)
+   };
+   this.pending={frame:current,time:timestampMs,result};
+   return result;
+  }catch(error){deleteAllocations(current.resources);throw error;}
+  finally{if(estimate)deleteAllocations(estimate.resources);if(adjacent)deleteAllocations(adjacent.resources);}
+ }
+ commit(timestampMs:number,accepted:boolean,promote=false):boolean{
+  const pending=this.pending;
+  if(!pending||pending.time!==timestampMs)return false;
+  this.pending=null;
+  if(accepted&&pending.result.status!=="lost"){
+   if(this.previous&&this.previous!==this.keyframe)deleteAllocations(this.previous.resources);
+   if(!this.keyframe||promote||pending.result.status==="initializing"){
+    if(this.keyframe)deleteAllocations(this.keyframe.resources);
+    this.keyframe=pending.frame;this.keyframeTime=timestampMs;this.keyframeContext=pending.result.context;
+    this.keyframeId=pending.result.status==="initializing"?pending.result.keyframeId:this.keyframeId+1;
+    this.previousMapping=IDENTITY_HOMOGRAPHY;
+   }else this.previousMapping=pending.result.visualHomography;
+   this.previous=pending.frame;
+  }else deleteAllocations(pending.frame.resources);
+  return true;
+ }
+ dispose(){if(this.disposed)return;this.disposed=true;if(this.pending)this.commit(this.pending.time,false);if(this.previous&&this.previous!==this.keyframe)deleteAllocations(this.previous.resources);if(this.keyframe)deleteAllocations(this.keyframe.resources);this.keyframe=null;this.previous=null;}
 }
 
 export async function loadOpenCvTracker(): Promise<OpenCvTracker> {
@@ -211,7 +145,7 @@ export async function loadOpenCvTracker(): Promise<OpenCvTracker> {
 class OpenCvJsAdapter implements OpenCvAdapter {
   constructor(private readonly cv: CV) {}
 
-  prepareFrame(frame: ImageBitmap | ImageData): PreparedCvFrame {
+  prepareFrame(frame: ImageBitmap | ImageData, roadRoiTopRatio?:number): PreparedCvFrame {
     const allocations: Mat[] = [];
     try {
       const imageData = readImageData(frame);
@@ -235,25 +169,30 @@ class OpenCvJsAdapter implements OpenCvAdapter {
 
       const roiTop = Math.min(
         height - 1,
-        Math.max(0, Math.floor(height * OPENCV_CONFIG.roadRoiTopRatio))
+        Math.max(0, Math.floor(height * (roadRoiTopRatio ?? OPENCV_CONFIG.roadRoiTopRatio)))
       );
-      const roiHeader = resized.roi(new this.cv.Rect(0, roiTop, width, height - roiTop));
-      allocations.push(roiHeader);
-      const grayRoadRoi = roiHeader.clone();
+      // LK keeps the full, equal-sized image and its real pyramid neighborhoods.
+      // Only feature detection is restricted to ground; changing pitch must not
+      // change image dimensions or introduce a synthetic black boundary.
+      const grayRoadRoi = resized.clone();
       allocations.push(grayRoadRoi);
-      const features = detectGoodFeatures(this.cv, grayRoadRoi);
+      const roiHeader=grayRoadRoi.roi(new this.cv.Rect(0,roiTop,width,height-roiTop));
+      allocations.push(roiHeader);
+      const features = detectGoodFeatures(this.cv, roiHeader);
       allocations.push(features);
+      for(let index=1;index<features.data32F.length;index+=2)features.data32F[index]!+=roiTop;
 
-      deleteAllocations([rgba, grayscale, resized, roiHeader]);
+      deleteAllocations([rgba, grayscale, resized,roiHeader]);
       return {
         resources: [grayRoadRoi, features],
+        sharpness:imageSharpness(grayRoadRoi,roiTop),
         candidateCount: features.rows,
         imageWidthPx: imageData.width,
         imageHeightPx: imageData.height,
         trackingFromImage: [
           scale, 0, 0,
           0, scale, 0,
-          0, -roiTop, 1
+          0, 0, 1
         ],
         opaque: { grayRoadRoi, features } satisfies OpenCvFrameOpaque
       };
@@ -265,7 +204,8 @@ class OpenCvJsAdapter implements OpenCvAdapter {
 
   track(
     previousFrame: PreparedCvFrame,
-    currentFrame: PreparedCvFrame
+    currentFrame: PreparedCvFrame,
+    initialImageHomography?:Mat3
   ): CvTrackEstimate {
     const previous = assertOpenCvFrame(previousFrame.opaque);
     const current = assertOpenCvFrame(currentFrame.opaque);
@@ -274,10 +214,16 @@ class OpenCvJsAdapter implements OpenCvAdapter {
     // Report tracking loss so the quality gate can request re-alignment.
     if (previous.features.rows === 0) return lostEstimate(resources, 0);
     try {
-      const nextPoints = new this.cv.Mat();
+      const initial=initialImageHomography&&multiplyHomographies(currentFrame.trackingFromImage,multiplyHomographies(initialImageHomography,invertHomography(previousFrame.trackingFromImage)));
+      const initialPoints=initial?Array.from(previous.features.data32F).map((_v,index,array)=>{
+       const offset=index-index%2;const x=array[offset]!,y=array[offset+1]!;const d=initial[2]*x+initial[5]*y+initial[8];return index%2?(initial[1]*x+initial[4]*y+initial[7])/d:(initial[0]*x+initial[3]*y+initial[6])/d;
+      }):null;
+      const nextPoints = initialPoints?this.cv.matFromArray(previous.features.rows,1,this.cv.CV_32FC2,initialPoints):new this.cv.Mat();
       const forwardStatus = new this.cv.Mat();
       const forwardErrors = new this.cv.Mat();
-      const backwardPoints = new this.cv.Mat();
+      // Validate the actual forward pair around its original point, rather
+      // than letting the reverse pyramid select another repeated road feature.
+      const backwardPoints = previous.features.clone();
       const backwardStatus = new this.cv.Mat();
       const backwardErrors = new this.cv.Mat();
       resources.push(
@@ -294,7 +240,9 @@ class OpenCvJsAdapter implements OpenCvAdapter {
         previous.features,
         nextPoints,
         forwardStatus,
-        forwardErrors
+        forwardErrors,
+        new this.cv.Size(21,21),3,new this.cv.TermCriteria(this.cv.TermCriteria_EPS|this.cv.TermCriteria_COUNT,30,.01),
+        initialPoints?this.cv.OPTFLOW_USE_INITIAL_FLOW:0
       );
       this.cv.calcOpticalFlowPyrLK(
         current.grayRoadRoi,
@@ -302,7 +250,9 @@ class OpenCvJsAdapter implements OpenCvAdapter {
         nextPoints,
         backwardPoints,
         backwardStatus,
-        backwardErrors
+        backwardErrors,
+        new this.cv.Size(21,21),3,new this.cv.TermCriteria(this.cv.TermCriteria_EPS|this.cv.TermCriteria_COUNT,30,.01),
+        this.cv.OPTFLOW_USE_INITIAL_FLOW
       );
 
       const matches = collectForwardBackwardMatches(
@@ -351,13 +301,23 @@ class OpenCvJsAdapter implements OpenCvAdapter {
         homography
       );
       const inlierCount = reprojectionErrors.length;
+      const sourceSupport=groundCoverage(matches.source,unsignedByteData(inlierMask),previous.grayRoadRoi.cols,previous.grayRoadRoi.rows);
+      const destinationSupport=groundCoverage(matches.destination,unsignedByteData(inlierMask),current.grayRoadRoi.cols,current.grayRoadRoi.rows);
+      const inverse=invertHomography(homography);
+      const backwards=calculateReprojectionErrors(matches.destination,matches.source,unsignedByteData(inlierMask),inverse);
+      const sorted=[...reprojectionErrors].sort((a,b)=>a-b);
+      const p90=sorted[Math.floor((sorted.length-1)*.9)]??Infinity;
       return {
         resources,
+        originalFeatureCount:previous.features.rows,
+        spatialCoverage:Math.min(sourceSupport,destinationSupport),
+        p90ReprojectionErrorPx:p90,
+        symmetricTransferErrorPx:median(backwards),
         homography,
         trackedFeatureCount: matches.count,
         inlierCount,
         medianReprojectionErrorPx: median(reprojectionErrors),
-        motionValid: hasSpatialSupport(matches.destination, unsignedByteData(inlierMask),
+        motionValid: sourceSupport>=.33&&destinationSupport>=.33&&inlierCount/Math.max(1,previous.features.rows)>=.25&&p90<=4&&median(backwards)<=3&&hasSpatialSupport(matches.destination, unsignedByteData(inlierMask),
           current.grayRoadRoi.cols, current.grayRoadRoi.rows) && isPlausibleMotion(
           homography,
           current.grayRoadRoi.cols,
@@ -369,6 +329,7 @@ class OpenCvJsAdapter implements OpenCvAdapter {
       throw error;
     }
   }
+  trackAdjacent(previous:PreparedCvFrame,current:PreparedCvFrame):CvTrackEstimate{return this.track(previous,current);}
 }
 
 export function toFullImageHomography(
@@ -636,15 +597,6 @@ function lostEstimate(
   };
 }
 
-function initializingQuality(featureCount: number): TrackingQuality {
-  return {
-    state: "weak",
-    featureCount,
-    inlierCount: 0,
-    inlierRatio: 0,
-    medianReprojectionErrorPx: Number.POSITIVE_INFINITY
-  };
-}
 
 function deleteAllocations(allocations: readonly CvAllocation[]): void {
   const uniqueAllocations = new Set(allocations);
@@ -670,3 +622,6 @@ export function hasSpatialSupport(points: readonly number[], mask: Uint8Array, w
   }
   return spreadX >= 0.1 && spreadY >= 0.1 && spreadX*spreadY >= 0.025 && xx*yy-xy*xy > 0.01*xx*yy;
 }
+
+function imageSharpness(image:Mat,roiTop=0):number{const data=unsignedByteData(image);let sum=0,count=0;for(let y=Math.max(1,roiTop+1);y<image.rows;y+=3)for(let x=1;x<image.cols;x+=3){const i=y*image.cols+x;sum+=Math.abs(data[i]!-data[i-1]!)+Math.abs(data[i]!-data[i-image.cols]!);count+=2;}return count?sum/count:0;}
+export function groundCoverage(points:readonly number[],mask:Uint8Array,width:number,height:number):number{const cells=new Set<number>();for(let i=0;i<mask.length;i++)if(mask[i]){const x=points[i*2]!,y=points[i*2+1]!;if(x>=0&&x<width&&y>=0&&y<height)cells.add(Math.floor(x/width*3)+3*Math.floor(y/height*4));}return cells.size/12;}

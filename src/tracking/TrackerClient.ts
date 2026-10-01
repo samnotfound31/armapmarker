@@ -2,6 +2,7 @@ import type { Mat3 } from "../domain/types";
 import { DEFAULT_TRACKING_THRESHOLDS } from "./quality";
 import type {
   TrackerResult,
+  TrackingFrameContext,
   TrackerWorkerRequest,
   TrackerWorkerResponse
 } from "./types";
@@ -17,8 +18,10 @@ export type MainThreadTracker = {
   process(
     frame: ImageBitmap,
     timestampMs: number,
-    sensorHomography: Mat3
+    sensorHomography: Mat3,
+    context?: TrackingFrameContext
   ): Promise<TrackerResult>;
+  commit?(timestampMs: number, accepted: boolean, promote?: boolean): boolean;
   dispose(): void;
 };
 
@@ -32,8 +35,9 @@ export type TrackingWorkerLike = {
 export type TrackerClientOptions = {
   workerFactory?: (() => TrackingWorkerLike) | null;
   mainThreadFactory: () => Promise<MainThreadTracker>;
-  onResult: (result: TrackerResult) => void;
+  onResult: (result: TrackerResult) => boolean | void;
   onUnavailable?: (message: string) => void;
+  onDiscarded?:()=>void;
   now?: () => number;
   mainThreadIntervalMs?: number;
   maxResultAgeMs?: number;
@@ -52,6 +56,7 @@ export class TrackerClient {
   private resolveStart: (() => void) | null = null;
   private rejectStart: ((error: Error) => void) | null = null;
   private fallbackAttempted = false;
+  private deadline:ReturnType<typeof setTimeout>|null=null;
 
   constructor(private readonly options: TrackerClientOptions) {
     this.workerFactory =
@@ -78,7 +83,9 @@ export class TrackerClient {
     }
 
     try {
-      this.mainThreadTracker = await this.options.mainThreadFactory();
+      const tracker=await this.options.mainThreadFactory();
+      if(this.currentStatus!=="starting"){tracker.dispose();throw new Error("Tracker client was disposed during initialization.");}
+      this.mainThreadTracker=tracker;
       this.currentStatus = "ready";
     } catch (error) {
       const message = errorMessage(error, "OpenCV could not initialize.");
@@ -90,7 +97,8 @@ export class TrackerClient {
   submitFrame(
     frame: ImageBitmap,
     timestampMs: number,
-    sensorHomography: Mat3
+    sensorHomography: Mat3,
+    context?: TrackingFrameContext
   ): boolean {
     if (this.currentStatus !== "ready" || this.inFlight) {
       frame.close();
@@ -106,10 +114,11 @@ export class TrackerClient {
     }
 
     this.inFlight = true;
+    this.armDeadline(1000,()=>this.handleWorkerUnavailable("Visual processing timeout; reacquiring."));
     this.lastSubmittedTimestampMs = timestampMs;
     if (this.worker) {
       this.worker.postMessage(
-        { type: "frame", frame, timestampMs, sensorHomography },
+        { type: "frame", frame, timestampMs, sensorHomography, context },
         [frame]
       );
       return true;
@@ -121,14 +130,16 @@ export class TrackerClient {
       frame.close();
       return false;
     }
+    const started=this.now();
     void tracker
-      .process(frame, timestampMs, sensorHomography)
-      .then((result) => this.deliverIfFresh(result))
+      .process(frame, timestampMs, sensorHomography, context)
+      .then((result) => this.deliverIfFresh({...result,processingMs:this.now()-started}))
       .catch((error: unknown) => {
         this.markUnavailable(errorMessage(error, "Visual tracking stopped."));
       })
       .finally(() => {
         this.inFlight = false;
+        this.clearDeadline();
         frame.close();
       });
     return true;
@@ -150,6 +161,7 @@ export class TrackerClient {
     this.mainThreadTracker = null;
     this.inFlight = false;
     this.currentStatus = "disposed";
+    this.clearDeadline();
   }
 
   private startWorker(): Promise<void> {
@@ -165,6 +177,7 @@ export class TrackerClient {
           this.handleWorkerUnavailable(message);
         };
         worker.postMessage({ type: "initialize" });
+        this.armDeadline(15000,()=>this.failWorkerInitialization("Visual worker initialization timeout."));
       } catch (error) {
         this.failWorkerInitialization(
           errorMessage(error, "Visual tracking worker could not start.")
@@ -177,6 +190,7 @@ export class TrackerClient {
     if (message.type === "ready") {
       if (this.currentStatus !== "starting") return;
       this.currentStatus = "ready";
+      this.clearDeadline();
       this.resolveStart?.();
       this.clearStartCallbacks();
       return;
@@ -187,18 +201,24 @@ export class TrackerClient {
     }
 
     this.inFlight = false;
+    this.clearDeadline();
     this.deliverIfFresh(message.result);
   }
 
   private deliverIfFresh(result: TrackerResult): void {
     const ageMs = this.now() - result.timestampMs;
-    if (ageMs < 0 || ageMs > this.maxResultAgeMs) return;
-    this.options.onResult(result);
+    const fresh=this.currentStatus==="ready" && ageMs>=0 && ageMs<=this.maxResultAgeMs;
+    if(this.currentStatus==="ready"&&!fresh)this.options.onDiscarded?.();
+    const accepted=fresh && this.options.onResult(result)!==false;
+    const promote=accepted && Boolean(result.promoteCandidate);
+    this.worker?.postMessage({type:"commit",timestampMs:result.timestampMs,accepted,promote});
+    this.mainThreadTracker?.commit?.(result.timestampMs,accepted,promote);
   }
 
   private failWorkerInitialization(message: string): void {
     if (this.currentStatus !== "starting" || this.fallbackAttempted) return;
     this.fallbackAttempted = true;
+    this.clearDeadline();
     this.terminateFailedWorker();
     void this.startMainThreadFallback(message);
   }
@@ -223,6 +243,7 @@ export class TrackerClient {
       }
       this.mainThreadTracker = tracker;
       this.currentStatus = "ready";
+      this.clearDeadline();
       this.resolveStart?.();
       this.clearStartCallbacks();
     } catch (error) {
@@ -249,10 +270,13 @@ export class TrackerClient {
   private markUnavailable(message: string): void {
     if (this.currentStatus === "disposed") return;
     this.currentStatus = "unavailable";
+    this.clearDeadline();
     this.inFlight = false;
     this.options.onUnavailable?.(message);
   }
 
+  private clearDeadline(){if(this.deadline)clearTimeout(this.deadline);this.deadline=null;}
+  private armDeadline(ms:number,callback:()=>void){this.clearDeadline();this.deadline=setTimeout(callback,ms);}
   private clearStartCallbacks(): void {
     this.resolveStart = null;
     this.rejectStart = null;

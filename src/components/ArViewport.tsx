@@ -1,3 +1,5 @@
+import type { RenderPoseController, StabilityTelemetry } from "../pose/RenderPoseController";
+import { AlignmentControls } from "./AlignmentControls";
 import { useEffect, useRef, useState } from "react";
 import type {
   GroundCalibration,
@@ -18,6 +20,10 @@ import type { NavigationSnapshot } from "../navigation/navigationEngine";
 import type { NavigationRuntimeSnapshot } from "../session/NavigationSession";
 
 export type ArViewportProps = {
+  controller?:RenderPoseController;
+  onVideo?: (video:HTMLVideoElement|null)=>void;
+  alignmentEditing?:boolean;
+  onAlignmentDone?:()=>void;
   stream: MediaStream;
   route: readonly RouteGroundPoint[];
   calibration: GroundCalibration;
@@ -39,6 +45,7 @@ export type ArViewportFailure =
     };
 
 export function ArViewport({
+  controller,onVideo,alignmentEditing,onAlignmentDone,
   stream,
   route,
   calibration,
@@ -53,10 +60,14 @@ export function ArViewport({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const poseRef = useRef(pose);
   const failureCallbackRef = useRef(onFailure);
+  const videoCallbackRef=useRef(onVideo);videoCallbackRef.current=onVideo;
+  const [telemetry,setTelemetry]=useState<StabilityTelemetry>();
   const [diagnostics, setDiagnostics] = useState<RouteRenderDiagnostics>();
   const debugEnabled = new URLSearchParams(window.location.search).get("arDebug") === "1";
   const [compatibilityError, setCompatibilityError] = useState<string | null>(null);
   failureCallbackRef.current = onFailure;
+
+  useEffect(()=>{controller?.setAlignmentEditing(alignmentEditing===true);},[controller,alignmentEditing]);
 
   useEffect(() => {
     poseRef.current = pose;
@@ -69,6 +80,7 @@ export function ArViewport({
     if (!host || !video || !canvas) return;
 
     video.srcObject = stream;
+    videoCallbackRef.current?.(video);
     let failureReported = false;
     const reportFailure = (failure: ArViewportFailure) => {
       if (failureReported) return;
@@ -131,7 +143,7 @@ export function ArViewport({
       if (
         imageWidthPx > 0 &&
         imageHeightPx > 0 &&
-        dimensionsMateriallyDiffer(
+        !controller && dimensionsMateriallyDiffer(
           imageWidthPx,
           imageHeightPx,
           calibration.intrinsics.imageWidthPx,
@@ -155,10 +167,12 @@ export function ArViewport({
 
     let lastDiagnosticsMs = 0;
     const renderFrame = (nowMs: number) => {
-      const next = renderer.render(poseRef.current);
+      const fallback=poseRef.current;
+      const next = renderer.render(controller?.sampleDisplayFrame(nowMs) ?? {...fallback,overlayOpacity:fallback.overlayOpacity??(fallback.quality.state==="realign"?0:fallback.quality.state==="locked"?1:.55)});
       if (nowMs - lastDiagnosticsMs >= 250) {
         lastDiagnosticsMs = nowMs;
         setDiagnostics(next);
+        if(controller)setTelemetry(controller.telemetry(nowMs));
       }
       frameId = requestAnimationFrame(renderFrame);
     };
@@ -196,9 +210,10 @@ export function ArViewport({
       video.removeEventListener("loadedmetadata", onLoadedMetadata);
       resizeObserver.disconnect();
       renderer.dispose();
+      videoCallbackRef.current?.(null);
       video.srcObject = null;
     };
-  }, [backendFactory, calibration, route, stream]);
+  }, [backendFactory, calibration, route, stream, controller]);
 
   return (
     <section
@@ -214,6 +229,7 @@ export function ArViewport({
         playsInline
         aria-label="Rear camera view"
       />
+      {alignmentEditing && controller && <div className="quick-calibration-card alignment-trim"><AlignmentControls initial={controller.getManualAlignment()} onChange={value=>controller.setManualAlignment(value)} onLock={onAlignmentDone??(()=>undefined)} /></div>}
       <canvas ref={canvasRef} className="ar-overlay" aria-hidden="true" />
       {debugEnabled && diagnostics && <output className="ar-debug" aria-label="AR diagnostics">
         <div>Geographic state: {pose.geographicState ?? "HEADING_UNCERTAIN"}</div>
@@ -229,7 +245,9 @@ export function ArViewport({
         <div>Route points ahead: {diagnostics.routePointsAhead} · Transformed: {diagnostics.transformed}</div>
         <div>In front: {diagnostics.inFrontOfCamera} · Projected: {diagnostics.projected}</div>
         <div>Visible markers: {diagnostics.visibleMarkers} · Rendered: {diagnostics.renderedMarkers}</div>
+        <div>Retained marker anchors: {diagnostics.retainedMarkerCount??0} · Changed: {diagnostics.changedMarkerAnchors??0}</div>
         <div>Last visual update: {pose.quality.visualUpdate ?? "initializing"}</div>
+        {telemetry && Object.entries(telemetry).map(([key,value])=><div key={key}>{key}: {typeof value==="number"?value.toFixed(2):String(value)}</div>)}
         <div>Confidence: {(pose.quality.confidence ?? 0.3).toFixed(2)}</div>
         <div>Reason: {pose.quality.rejectionReason ?? diagnostics.reason}</div>
       </output>}

@@ -52,6 +52,8 @@ import { createSessionStore, type SessionStore } from "../session/sessionStore";
 export type CalibrationRuntime = BrowserCalibrationRuntime;
 
 export type NavigationSessionLike = {
+  renderPoseController?: import("../pose/RenderPoseController").RenderPoseController;
+  attachVideo?: (video:HTMLVideoElement|null)=>void;
   start(): Promise<void>;
   stop(): void;
 };
@@ -227,6 +229,7 @@ export function App({
   };
 
   const releaseSession = () => {
+    setAlignmentEditing(false);
     activeSession.current?.stop();
     activeSession.current = null;
   };
@@ -389,7 +392,8 @@ export function App({
     }
   };
 
-  const realign = () => beginRealignment();
+  const [alignmentEditing,setAlignmentEditing]=useState(false);
+  const realign = () => {if(activeSession.current?.renderPoseController)setAlignmentEditing(true);else beginRealignment();};
 
   const recalculateRoute = () => {
     if (!route) return;
@@ -585,6 +589,10 @@ export function App({
       <main className="navigation-shell">
         <UpdatePrompt />
         <ArViewport
+          controller={activeSession.current?.renderPoseController}
+          onVideo={video=>activeSession.current?.attachVideo?.(video)}
+          alignmentEditing={alignmentEditing}
+          onAlignmentDone={()=>setAlignmentEditing(false)}
           stream={grant.stream}
           route={preparedRoute.groundRoute}
           calibration={calibration}

@@ -50,10 +50,9 @@ export async function completeCalibration(page: Page): Promise<void> {
 }
 
 export async function completeRoadAlignment(page: Page): Promise<void> {
-  const road = page.getByRole("button", { name: /road calibration view/i });
-  await expect(road).toBeEnabled();
-  const box = (await road.boundingBox())!;
-  await road.click({ position: { x: box.width / 2, y: box.height * 0.7 } });
+  const lock = page.getByRole("button", { name: "Lock alignment", exact: true });
+  await expect(lock).toBeEnabled();
+  await lock.click();
   await expect(page.getByLabel(/augmented reality navigation view/i)).toBeVisible();
 }
 

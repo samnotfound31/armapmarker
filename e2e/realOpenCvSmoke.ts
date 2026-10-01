@@ -1,4 +1,13 @@
 import type { Mat3 } from "../src/domain/types";
+import {RenderPoseController} from "../src/pose/RenderPoseController";
+import {CameraFrameTimeline} from "../src/session/CameraFrameTimeline";
+import {TrackingQualityGate} from "../src/tracking/quality";
+import {buildApproximateIntrinsics} from "../src/geometry/intrinsics";
+import {buildCameraFromGroundWithEarthFrame,GEOGRAPHIC_EARTH_FROM_GROUND} from "../src/geometry/groundCalibration";
+import {invertHomography,multiplyHomographies} from "../src/tracking/residualHomography";
+import {registrationDistance,warp} from "../src/pose/groundRegistration";
+import type {GroundCalibration} from "../src/domain/types";
+import {RouteRenderer} from "../src/ar/RouteRenderer";
 import { loadOpenCvTracker } from "../src/tracking/OpenCvTracker";
 
 type RuntimeSmokeResult = {
@@ -11,8 +20,13 @@ type RuntimeSmokeResult = {
     inlierCount: number;
     qualityState: string;
     homography: Mat3 | null;
+    coverage?:number;
+    survivalRatio?:number;
+    p90?:number;
+    median?:number;
   };
   cleanupVerified?: boolean;
+  sequence?:{frames:number;accepted:number;promotions:number;maximumResidualPx:number;maximumPromotionDeltaPx:number;recovered:boolean;changedMarkerAnchors:number;weakOpacity:number;diagnostics?:string[]};
   error?: string;
 };
 
@@ -45,13 +59,25 @@ async function run(): Promise<void> {
       return;
     }
 
+    if(mode==="planar-motion"){
+      const sequence=await planarSequence(tracker);
+      tracker.dispose();publish({status:"tracked",runtimeLoaded:true,sequence,cleanupVerified:await rejectsAfterDispose(tracker,new ImageData(1,1),9000),securityViolations});return;
+    }
     const [firstFrame, secondFrame] = deterministicProjectiveFrames();
-    await tracker.process(firstFrame, 1000, IDENTITY);
-    let result = await tracker.process(secondFrame, 1033, IDENTITY);
+    const gate=new TrackingQualityGate();
+    await tracker.process(firstFrame,1000,IDENTITY);tracker.commit(1000,true);
+    let result=await tracker.process(secondFrame,1100,IDENTITY);
+    for(let index=0;index<5;index++){
+      if(index)result=await tracker.process(secondFrame,1100+index*100,IDENTITY);
+      const q=result.quality;const accepted=result.status==="tracked";
+      gate.update({timestampMs:result.timestampMs,candidateCount:q.featureCount,inlierCount:q.inlierCount,medianReprojectionErrorPx:q.medianReprojectionErrorPx,motionValid:accepted},result.timestampMs);
+      tracker.commit(result.timestampMs,accepted,accepted&&Boolean(result.promoteCandidate));
+    }
     if (mode === "texture-loss") {
       const blank = new ImageData(firstFrame.width, firstFrame.height);
       for (let index = 0; index < 35; index++) {
-        result = await tracker.process(blank, 1066 + index * 33, IDENTITY);
+        result = await tracker.process(blank,1600+index*100,IDENTITY);
+        gate.update({timestampMs:result.timestampMs,candidateCount:0,inlierCount:0,medianReprojectionErrorPx:Infinity,motionValid:false},result.timestampMs);tracker.commit(result.timestampMs,false);
       }
     }
     tracker.dispose();
@@ -63,8 +89,8 @@ async function run(): Promise<void> {
         status: result.status,
         featureCount: result.quality.featureCount,
         inlierCount: result.quality.inlierCount,
-        qualityState: result.quality.state,
-        homography: result.visualHomography
+        qualityState: gate.tick(result.timestampMs).state,
+        homography: result.visualHomography,coverage:result.spatialCoverage,survivalRatio:result.quality.inlierCount/(result.originalFeatureCount??1),p90:result.p90ReprojectionErrorPx,median:result.quality.medianReprojectionErrorPx
       },
       cleanupVerified,
       securityViolations
@@ -80,6 +106,60 @@ async function run(): Promise<void> {
           : String(error)
     });
   }
+}
+
+/** Real shipped LK/RANSAC path on a textured planar scene, with full nominal translation/rotation/bob. */
+async function planarSequence(tracker:Awaited<ReturnType<typeof loadOpenCvTracker>>){
+ const texture=planarTexture();const width=texture.width,height=texture.height;
+ const camera=(t:number)=>buildCameraFromGroundWithEarthFrame({alphaRad:.015*Math.sin(t*.006),betaRad:1.4+.02*Math.sin(t*.011),gammaRad:.01*Math.sin(t*.011)},GEOGRAPHIC_EARTH_FROM_GROUND,[0,1.4,0]);
+ const calibration:GroundCalibration={stage:"locked",cameraHeightMeters:1.4,intrinsics:buildApproximateIntrinsics(width,height),imageToScreen:IDENTITY,groundFromRoute:[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1],cameraFromGroundAtLock:camera(0),calibrationRouteDistanceMeters:0,lockedAtMs:0};
+ const controller=new RenderPoseController(calibration),timeline=new CameraFrameTimeline();
+ const context=(time:number)=>controller.captureFrame(timeline.stamp({nowMs:time,width,height,orientation:0}));
+ const first=context(0),base=first.nominalPlane;
+ const initial=await tracker.process(texture,0,IDENTITY,first);tracker.commit(0,controller.acceptTracking(initial,0));
+ const canvas=document.createElement("canvas");canvas.width=width;canvas.height=height;document.body.append(canvas);
+ const renderer=new RouteRenderer({canvas,calibration,route:[{rightMeters:0,upMeters:0,forwardMeters:0,routeDistanceMeters:0},{rightMeters:0,upMeters:0,forwardMeters:50,routeDistanceMeters:50}]});renderer.resize(width,height);
+ const diagnostics:string[]=[];
+ let accepted=0,promotions=0,maximumResidualPx=0,maximumPromotionDeltaPx=0,changedMarkerAnchors=0,weakOpacity=0,hadLoss=false,recovered=false;
+ try{
+  for(let index=1;index<=50;index++){
+   const t=index*100;
+   controller.updateRate([0,0,0],t);controller.updateSensor({timestampMs:t,cameraFromGround:camera(t),orientationQuaternion:[0,0,0,1]});
+   controller.updateGps({timestampMs:t,cameraPositionGroundMeters:[0,1.4+.04*Math.sin(t*.011),t*.00025],routeProgressMeters:t*.00025},1);
+   const current=context(t),observed=multiplyHomographies(current.nominalPlane,invertHomography(base));
+   const blank=index>=20&&index<=23;const image=blank?new ImageData(width,height):warpTexture(texture,observed);
+   const before=controller.sampleDisplayFrame(t);const candidate=await tracker.process(image,t,IDENTITY,current);
+   const commit=controller.acceptTracking(candidate,t);tracker.commit(t,commit,commit&&Boolean(candidate.promoteCandidate));
+   const pose=controller.sampleDisplayFrame(t);if(!blank&&!commit)diagnostics.push(`${index}:${candidate.status}:${controller.telemetry(t).lastRejection}:${candidate.quality.featureCount}/${candidate.quality.inlierCount}:${candidate.spatialCoverage}:${candidate.p90ReprojectionErrorPx}`);if(commit&&candidate.status==="tracked"){
+    accepted++;maximumResidualPx=Math.max(maximumResidualPx,registrationDistance(IDENTITY,pose.visualCorrection.imageHomography,width,height));
+    if(candidate.promoteCandidate){promotions++;maximumPromotionDeltaPx=Math.max(maximumPromotionDeltaPx,registrationDistance(before.visualCorrection.imageHomography,pose.visualCorrection.imageHomography,width,height));}
+   }
+   if(blank){hadLoss=true;weakOpacity=pose.overlayOpacity;}
+   if(hadLoss&&!blank&&pose.quality.state==="locked")recovered=true;
+   const projection=renderer.render(pose);changedMarkerAnchors=Math.max(changedMarkerAnchors,projection?.changedMarkerAnchors??0);
+  }
+ }finally{renderer.dispose();canvas.remove();}
+ return {diagnostics,frames:50,accepted,promotions,maximumResidualPx,maximumPromotionDeltaPx,recovered,changedMarkerAnchors,weakOpacity};
+}
+
+// An unbounded virtual ground texture supplies newly visible road as the camera walks.
+function planarPixel(x:number,y:number):number{
+ const gridX=Math.floor(x/12),gridY=Math.floor(y/12),checker=(gridX+gridY)%2===0?70:24;
+ const noise=((x*29+y*47+x*y*3)%31+31)%31-15;
+ const squareX=((x-8)%20+20)%20,squareY=((y-98)%18+18)%18;
+ return squareX<6&&squareY<6?220:checker+noise;
+}
+function planarTexture():ImageData{
+ const image=new ImageData(320,240);for(let y=0;y<240;y++)for(let x=0;x<320;x++){const i=(y*320+x)*4,v=planarPixel(x,y);image.data[i]=v;image.data[i+1]=v;image.data[i+2]=v;image.data[i+3]=255;}return image;
+}
+function warpTexture(source:ImageData,mapping:Mat3):ImageData{
+ const image=new ImageData(source.width,source.height),inverse=invertHomography(mapping);
+ for(let y=0;y<image.height;y++)for(let x=0;x<image.width;x++){
+  const [u,v]=warp(inverse,x,y),sx=Math.floor(u),sy=Math.floor(v),fx=u-sx,fy=v-sy,out=(y*image.width+x)*4;
+  const value=(planarPixel(sx,sy)*(1-fx)+planarPixel(sx+1,sy)*fx)*(1-fy)+(planarPixel(sx,sy+1)*(1-fx)+planarPixel(sx+1,sy+1)*fx)*fy;
+  image.data[out]=value;image.data[out+1]=value;image.data[out+2]=value;image.data[out+3]=255;
+ }
+ return image;
 }
 
 async function rejectsAfterDispose(

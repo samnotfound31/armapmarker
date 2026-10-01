@@ -124,6 +124,7 @@ function pose(
     cameraFromGround: IDENTITY_MAT4,
     visualCorrection: { imageHomography: IDENTITY_MAT3, keyframeId: 1, timestampMs: 1 },
     routeProgressMeters,
+    overlayOpacity:qualityState === "locked" ? 1 : qualityState === "realign" ? 0 : 0.5,
     quality: {
       state: qualityState,
       featureCount: 40,
